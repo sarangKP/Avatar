@@ -222,6 +222,7 @@ class MuseTalkAvatarPipeline:
         self._input_latent_list_cycle = input_latent_list + input_latent_list[::-1]
         self._mask_list_cycle         = mask_list + mask_list[::-1]
         self._mask_coords_list_cycle  = mask_coords_list + mask_coords_list[::-1]
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -354,8 +355,7 @@ class MuseTalkAvatarPipeline:
 
                 # ── Step 3: MuseTalk UNet inference ──────────────────────
                 t0 = time.time()
-                video_num = len(whisper_chunks)
-                all_frames: List[np.ndarray] = []
+                res_frame_list: List[np.ndarray] = []
 
                 gen = datagen(
                     whisper_chunks,
@@ -366,71 +366,57 @@ class MuseTalkAvatarPipeline:
                 for whisper_batch, latent_batch in gen:
                     if self._interrupt.is_set():
                         break
-
                     audio_feature_batch = self._pe(whisper_batch.to(self._device))
                     latent_batch = latent_batch.to(
-                        device=self._device, dtype=self._unet.model.dtype
+                        device=self._device, dtype=self._weight_dtype
                     )
                     pred_latents = self._unet.model(
                         latent_batch,
                         self._timesteps,
                         encoder_hidden_states=audio_feature_batch,
                     ).sample
-                    pred_latents = pred_latents.to(
-                        device=self._device, dtype=self._vae.vae.dtype
-                    )
                     recon = self._vae.decode_latents(pred_latents)
-
                     for res_frame in recon:
-                        all_frames.append(res_frame)
+                        res_frame_list.append(res_frame)
 
-                logger.info(f"[MuseTalk] {len(all_frames)} frames in {time.time()-t0:.2f}s")
+                logger.info(f"[UNet] {len(res_frame_list)} frames in {time.time()-t0:.2f}s")
 
-                if self._interrupt.is_set() or not all_frames:
+                if self._interrupt.is_set():
                     continue
 
-                # ── Step 4: Blend frames back onto reference face ────────
-                import copy
+                # ── Step 4: Blend frames back onto original ───────────────
                 t0 = time.time()
                 blended_frames: List[np.ndarray] = []
+                cycle_len = len(self._frame_list_cycle)
 
-                for i, res_frame in enumerate(all_frames):
-                    idx   = i % len(self._coord_list_cycle)
-                    bbox  = self._coord_list_cycle[idx]
-                    ori   = copy.deepcopy(self._frame_list_cycle[idx])
-
-                    if bbox == coord_placeholder:
-                        blended_frames.append(ori)
-                        continue
-
+                for idx, res_frame in enumerate(res_frame_list):
+                    ci  = idx % cycle_len
+                    ori = self._frame_list_cycle[ci].copy()
+                    bbox = self._coord_list_cycle[ci]
                     x1, y1, x2, y2 = bbox
                     y2m = min(y2 + self.extra_margin, ori.shape[0])
                     try:
                         res_resized = cv2.resize(
                             res_frame.astype(np.uint8), (x2 - x1, y2m - y1)
                         )
-                    except Exception:
-                        blended_frames.append(ori)
+                    except cv2.error:
                         continue
-
-                    mask      = self._mask_list_cycle[idx]
-                    crop_box  = self._mask_coords_list_cycle[idx]
-                    combined  = get_image_blending(ori, res_resized, [x1, y1, x2, y2m], mask, crop_box)
-                    combined  = enhance_frame(combined)
+                    mask     = self._mask_list_cycle[ci]
+                    crop_box = self._mask_coords_list_cycle[ci]
+                    combined = get_image_blending(ori, res_resized, [x1, y1, x2, y2m], mask, crop_box)
+                    combined = enhance_frame(combined)
                     blended_frames.append(combined)
 
                 logger.info(f"[Blend] {len(blended_frames)} frames in {time.time()-t0:.2f}s")
 
-                # ── Step 5: Sync debug + emit ────────────────────────────
-                audio_duration_s    = len(audio) / TTS_SR
-                video_duration_s    = len(blended_frames) / self.fps
-                expected_frames     = max(1, round(audio_duration_s * self.fps))
-                playback_rate       = audio_duration_s / video_duration_s if video_duration_s > 0 else 1.0
+                # ── Step 5: Sync debug + emit ─────────────────────────────
+                audio_duration_s = len(audio) / TTS_SR
+                video_duration_s = len(blended_frames) / self.fps
+                playback_rate    = audio_duration_s / video_duration_s if video_duration_s > 0 else 1.0
 
                 logger.info(
                     f"[SYNC DEBUG] "
                     f"audio={audio_duration_s:.2f}s | "
-                    f"expected_frames={expected_frames} | "
                     f"actual_frames={len(blended_frames)} | "
                     f"video_duration={video_duration_s:.2f}s | "
                     f"playback_rate={playback_rate:.2f}x"
