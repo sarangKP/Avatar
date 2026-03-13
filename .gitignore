@@ -16,3 +16,8 @@ ffplay*
 debug
 exp_out
 .gradio
+musetalk_env/
+experiments/pretrained_models/
+gfpgan/weights/
+*.pth
+*.onnx

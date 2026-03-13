@@ -14,6 +14,7 @@ from omegaconf import OmegaConf
 from transformers import WhisperModel
 import sys
 
+from musetalk.utils.enhancer import enhance_frame
 from musetalk.utils.blending import get_image
 from musetalk.utils.face_parsing import FaceParsing
 from musetalk.utils.audio_processor import AudioProcessor
@@ -224,6 +225,8 @@ def main(args):
                     combine_frame = get_image(ori_frame, res_frame, [x1, y1, x2, y2], mode=args.parsing_mode, fp=fp)
                 else:
                     combine_frame = get_image(ori_frame, res_frame, [x1, y1, x2, y2], fp=fp)
+                
+                combine_frame = enhance_frame(combine_frame)  
                 cv2.imwrite(f"{result_img_save_path}/{str(i).zfill(8)}.png", combine_frame)
 
             # Save prediction results

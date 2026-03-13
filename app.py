@@ -10,7 +10,7 @@ import subprocess
 
 from huggingface_hub import snapshot_download
 import requests
-
+from musetalk.utils.enhancer import enhance_frame
 import argparse
 import os
 from omegaconf import OmegaConf
@@ -327,7 +327,8 @@ def inference(audio_path, video_path, bbox_shift, extra_margin=10, parsing_mode=
         
         # Use v15 version blending
         combine_frame = get_image(ori_frame, res_frame, [x1, y1, x2, y2], mode=args.parsing_mode, fp=fp)
-            
+
+        combine_frame = enhance_frame(combine_frame)     
         cv2.imwrite(f"{result_img_save_path}/{str(i).zfill(8)}.png",combine_frame)
         
     # Frame rate
