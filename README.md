@@ -25,21 +25,21 @@ The original MuseTalk repo provides offline video-dubbing inference. This fork a
 User text input (browser)
         │
         ▼
-┌─────────────────┐   sentence stream   ┌──────────────────────────────┐
+┌─────────────────┐   sentence stream  ┌──────────────────────────────┐
 │  LLM thread     │ ─────────────────► │  TTS + MuseTalk worker       │
 │  (streaming)    │                    │  (serial, per sentence)      │
 └─────────────────┘                    └──────────────┬───────────────┘
                                                       │ SyncedChunk
                                                       │ (audio + frames)
                                                       ▼
-                                          ┌───────────────────┐
-                                          │  Flask SSE /sync_feed │
-                                          └────────┬──────────┘
-                                                   │
-                                                   ▼
-                                          Browser (canvas + Web Audio)
-                                          AudioContext as master clock
-                                          lip-sync via playbackRate
+                                            ┌───────────────────┐
+                                            │Flask SSE/sync_feed│
+                                            └────────┬──────────┘
+                                                     │
+                                                     ▼
+                                            Browser (canvas + Web Audio)
+                                            AudioContext as master clock
+                                            lip-sync via playbackRate
 ```
 
 ### Thread Model
