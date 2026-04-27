@@ -75,9 +75,8 @@ sudo apt-get install -y ffmpeg espeak-ng
 ---
 1. Clone the repo
 
-git clone https://github.com/sarangKP/MuseTalk-LiveAvatar.git
-cd MuseTalk-LiveAvatar
-git checkout ust
+git clone https://github.com/sarangKP/Avatar.git
+cd Avatar
 
 2. Install Python dependencies
 
@@ -142,11 +141,12 @@ Then open http://localhost:7860 in your local browser.
 
 Option B — bind to all interfaces (if your server IP is directly reachable):
 
+The server already binds to `0.0.0.0` by default, so just start it normally:
+
 python run_musetalk_avatar.py \
     --avatar_image examples/face_1.png \
     --llm_backend echo \
-    --port 7860 \
-    --ip 0.0.0.0
+    --port 7860
 
 Then open http://<server-ip>:7860 in your browser.
 
