@@ -1,3 +1,4 @@
+import io
 import math
 import os
 
@@ -12,10 +13,16 @@ class AudioProcessor:
     def __init__(self, feature_extractor_path="openai/whisper-tiny/"):
         self.feature_extractor = AutoFeatureExtractor.from_pretrained(feature_extractor_path)
 
-    def get_audio_feature(self, wav_path, start_index=0, weight_dtype=None):
-        if not os.path.exists(wav_path):
+    def get_audio_feature(self, wav_source, start_index=0, weight_dtype=None):
+        """
+        wav_source: file path (str) OR in-memory WAV (bytes / io.BytesIO).
+        Accepting BytesIO avoids the temp-file write-then-read round-trip.
+        """
+        if isinstance(wav_source, (bytes, bytearray)):
+            wav_source = io.BytesIO(wav_source)
+        elif isinstance(wav_source, str) and not os.path.exists(wav_source):
             return None
-        librosa_output, sampling_rate = librosa.load(wav_path, sr=16000)
+        librosa_output, sampling_rate = librosa.load(wav_source, sr=16000)
         assert sampling_rate == 16000
         # Split audio into 30s segments
         segment_length = 30 * sampling_rate

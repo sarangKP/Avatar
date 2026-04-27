@@ -40,6 +40,7 @@ Thread model (updated):
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import os
 import re
@@ -108,18 +109,6 @@ def _audio_to_wav_bytes(audio: np.ndarray, sr: int = TTS_SR) -> bytes:
     return buf.getvalue()
 
 
-def _wav_bytes_to_tempfile(wav_bytes: bytes) -> str:
-    """
-    Write WAV bytes to a NamedTemporaryFile and return the path.
-    Only called when AudioProcessor cannot accept an io.BytesIO directly.
-    The caller is responsible for unlinking the file.
-    """
-    import tempfile
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    tmp.write(wav_bytes)
-    tmp.flush()
-    tmp.close()
-    return tmp.name
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +427,29 @@ class MuseTalkAvatarPipeline:
     # Whisper + UNet worker (formerly the single "worker" thread)
     # ------------------------------------------------------------------
 
+    def _blend_batch(self, frames: List[np.ndarray], frame_offset: int) -> List[np.ndarray]:
+        """Blend one UNet output batch onto the original face. Thread-safe (read-only cycle lists)."""
+        result = []
+        cycle_len = len(self._frame_list_cycle)
+        for i, res_frame in enumerate(frames):
+            ci  = (frame_offset + i) % cycle_len
+            ori = self._frame_list_cycle[ci].copy()
+            bbox = self._coord_list_cycle[ci]
+            x1, y1, x2, y2 = bbox
+            y2m = min(y2 + self.extra_margin, ori.shape[0])
+            try:
+                res_resized = cv2.resize(
+                    res_frame.astype(np.uint8), (x2 - x1, y2m - y1)
+                )
+            except cv2.error:
+                continue
+            mask     = self._mask_list_cycle[ci]
+            crop_box = self._mask_coords_list_cycle[ci]
+            combined = get_image_blending(ori, res_resized, [x1, y1, x2, y2m], mask, crop_box)
+            combined = enhance_frame(combined)
+            result.append(combined)
+        return result
+
     @torch.no_grad()
     def _unet_worker(self):
         logger.info("[UNet worker] started")
@@ -456,46 +468,47 @@ class MuseTalkAvatarPipeline:
                 continue
 
             tts_result: _TtsResult = item
-            audio    = tts_result.audio
+            audio     = tts_result.audio
             wav_bytes = tts_result.wav_bytes
 
-            # OPT 2: write WAV bytes to a temp path only here (AudioProcessor
-            # currently requires a file path).  One small tempfile write is
-            # still needed, but TTS is completely decoupled from it.
-            wav_path = _wav_bytes_to_tempfile(wav_bytes)
-
-            try:
-                # ── Step 2: Extract Whisper audio features ───────────────
-                t0 = time.time()
-                whisper_input_features, librosa_length = \
-                    self._audio_processor.get_audio_feature(
-                        wav_path, weight_dtype=self._weight_dtype
-                    )
-                whisper_chunks = self._audio_processor.get_whisper_chunk(
-                    whisper_input_features,
-                    self._device,
-                    self._weight_dtype,
-                    self._whisper,
-                    librosa_length,
-                    fps=self.fps,
-                    audio_padding_length_left=self.audio_padding_left,
-                    audio_padding_length_right=self.audio_padding_right,
+            # ── Step 2: Extract Whisper audio features (no temp file) ────
+            t0 = time.time()
+            whisper_input_features, librosa_length = \
+                self._audio_processor.get_audio_feature(
+                    io.BytesIO(wav_bytes), weight_dtype=self._weight_dtype
                 )
-                logger.info(f"[Whisper] {len(whisper_chunks)} chunks in {time.time()-t0:.3f}s")
+            whisper_chunks = self._audio_processor.get_whisper_chunk(
+                whisper_input_features,
+                self._device,
+                self._weight_dtype,
+                self._whisper,
+                librosa_length,
+                fps=self.fps,
+                audio_padding_length_left=self.audio_padding_left,
+                audio_padding_length_right=self.audio_padding_right,
+            )
+            logger.info(f"[Whisper] {len(whisper_chunks)} chunks in {time.time()-t0:.3f}s")
 
-                if self._interrupt.is_set():
-                    continue
+            if self._interrupt.is_set():
+                continue
 
-                # ── Step 3: MuseTalk UNet inference ──────────────────────
-                t0 = time.time()
-                res_frame_list: List[np.ndarray] = []
+            # ── Step 3+4: UNet inference pipelined with parallel blending ─
+            # As each GPU batch finishes, submit blending to a thread pool
+            # so the CPU blends batch N while the GPU runs batch N+1.
+            t0 = time.time()
+            blend_futures: List[concurrent.futures.Future] = []
+            frame_offset = 0
+            total_unet_frames = 0
 
-                gen = datagen(
-                    whisper_chunks,
-                    self._input_latent_list_cycle,
-                    self.batch_size,
-                )
+            gen = datagen(
+                whisper_chunks,
+                self._input_latent_list_cycle,
+                self.batch_size,
+            )
 
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(4, (os.cpu_count() or 4))
+            ) as blend_pool:
                 for whisper_batch, latent_batch in gen:
                     if self._interrupt.is_set():
                         break
@@ -508,68 +521,47 @@ class MuseTalkAvatarPipeline:
                         self._timesteps,
                         encoder_hidden_states=audio_feature_batch,
                     ).sample
-                    recon = self._vae.decode_latents(pred_latents)
-                    for res_frame in recon:
-                        res_frame_list.append(res_frame)
+                    batch_frames = list(self._vae.decode_latents(pred_latents))
+                    total_unet_frames += len(batch_frames)
 
-                logger.info(f"[UNet] {len(res_frame_list)} frames in {time.time()-t0:.3f}s")
+                    # Submit blending for this batch while GPU starts the next
+                    future = blend_pool.submit(
+                        self._blend_batch, batch_frames, frame_offset
+                    )
+                    blend_futures.append(future)
+                    frame_offset += len(batch_frames)
 
-                if self._interrupt.is_set():
-                    continue
-
-                # ── Step 4: Blend frames back onto original ───────────────
-                t0 = time.time()
+                # Collect blended results in submission order
                 blended_frames: List[np.ndarray] = []
-                cycle_len = len(self._frame_list_cycle)
+                for future in blend_futures:
+                    blended_frames.extend(future.result())
 
-                for idx, res_frame in enumerate(res_frame_list):
-                    ci  = idx % cycle_len
-                    ori = self._frame_list_cycle[ci].copy()
-                    bbox = self._coord_list_cycle[ci]
-                    x1, y1, x2, y2 = bbox
-                    y2m = min(y2 + self.extra_margin, ori.shape[0])
-                    try:
-                        res_resized = cv2.resize(
-                            res_frame.astype(np.uint8), (x2 - x1, y2m - y1)
-                        )
-                    except cv2.error:
-                        continue
-                    mask     = self._mask_list_cycle[ci]
-                    crop_box = self._mask_coords_list_cycle[ci]
-                    combined = get_image_blending(ori, res_resized, [x1, y1, x2, y2m], mask, crop_box)
-                    combined = enhance_frame(combined)
-                    blended_frames.append(combined)
+            logger.info(
+                f"[UNet+Blend] {total_unet_frames} frames → "
+                f"{len(blended_frames)} blended in {time.time()-t0:.3f}s"
+            )
 
-                logger.info(f"[Blend] {len(blended_frames)} frames in {time.time()-t0:.3f}s")
+            if self._interrupt.is_set():
+                continue
 
-                # ── Step 5: Sync debug + emit ─────────────────────────────
-                audio_duration_s = len(audio) / TTS_SR
-                video_duration_s = len(blended_frames) / self.fps
-                playback_rate    = audio_duration_s / video_duration_s if video_duration_s > 0 else 1.0
+            # ── Step 5: Sync debug + emit ─────────────────────────────────
+            audio_duration_s = len(audio) / TTS_SR
+            video_duration_s = len(blended_frames) / self.fps
+            playback_rate    = audio_duration_s / video_duration_s if video_duration_s > 0 else 1.0
 
-                logger.info(
-                    f"[SYNC] audio={audio_duration_s:.2f}s | "
-                    f"frames={len(blended_frames)} | "
-                    f"video={video_duration_s:.2f}s | "
-                    f"rate={playback_rate:.2f}x"
-                )
+            logger.info(
+                f"[SYNC] audio={audio_duration_s:.2f}s | "
+                f"frames={len(blended_frames)} | "
+                f"video={video_duration_s:.2f}s | "
+                f"rate={playback_rate:.2f}x"
+            )
 
-                chunk = SyncedChunk(
-                    audio=audio,
-                    frames=blended_frames,
-                    fps=self.fps,
-                )
-                self.output_q.put(chunk)
-                logger.info(
-                    f"[Worker] queued SyncedChunk: "
-                    f"{audio_duration_s:.2f}s audio, {len(blended_frames)} frames"
-                )
-
-            finally:
-                try:
-                    os.unlink(wav_path)
-                except OSError:
-                    pass
+            chunk = SyncedChunk(audio=audio, frames=blended_frames, fps=self.fps)
+            self.output_q.put(chunk)
+            logger.info(
+                f"[Worker] queued SyncedChunk: "
+                f"{audio_duration_s:.2f}s audio, {len(blended_frames)} frames"
+            )
 
         logger.info("[UNet worker] exited")
 
