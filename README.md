@@ -57,81 +57,50 @@ Audio playback time is the master clock. The browser schedules each audio chunk 
 
 ## Installation
 
-### 1. Environment
+### Prerequisites
 
-Python 3.10 + CUDA 11.8 recommended (tested on RTX 3080).
-
-```bash
-conda create -n MuseTalk python==3.10
-conda activate MuseTalk
-```
-
-### 2. PyTorch
+- Python 3.10
+- CUDA 11.8
+- [uv](https://docs.astral.sh/uv/) package manager
+- FFmpeg
 
 ```bash
-pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 \
-    --index-url https://download.pytorch.org/whl/cu118
-```
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.cargo/env
 
-### 3. Core Dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Avatar Pipeline Dependencies
-
-```bash
-pip install flask loguru kokoro>=0.9.2 scipy soundfile
-# espeak-ng is required by Kokoro for phonemisation
-sudo apt-get install espeak-ng
-```
-
-### 5. MMLab Packages
-
-```bash
-pip install --no-cache-dir -U openmim
-mim install mmengine
-mim install "mmcv==2.0.1"
-mim install "mmdet==3.1.0"
-mim install "mmpose==1.1.0"
-```
-
-### 6. FFmpeg
-
-```bash
-# Ubuntu
-sudo apt-get install ffmpeg
-
-# Or export path to a static build
-export FFMPEG_PATH=/path/to/ffmpeg-static
-```
-
-### 7. (Optional) GFPGAN — Face Enhancement
-
-```bash
-pip install gfpgan
-# Download weights
-mkdir -p experiments/pretrained_models
-wget https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth \
-    -O experiments/pretrained_models/GFPGANv1.4.pth
-```
+# Install FFmpeg
+sudo apt-get install -y ffmpeg espeak-ng
 
 ---
+1. Clone the repo
 
-## Download Model Weights
+git clone https://github.com/sarangKP/MuseTalk-LiveAvatar.git
+cd MuseTalk-LiveAvatar
+git checkout ust
 
-```bash
-# Linux
-sh ./download_weights.sh
+2. Install Python dependencies
 
-# Windows
-download_weights.bat
-```
+# Creates .venv automatically and installs all pip-installable deps
+uv sync
+
+# Activate the venv
+source .venv/bin/activate
+
+3. Install MMLab packages
+
+MMLab packages require CUDA-specific pre-built wheels and cannot go through uv.
+Run the provided script after uv sync:
+
+bash setup_mmlab.sh
+
+This installs: mmengine, mmcv==2.0.1, mmdet==3.1.0, mmpose==1.1.0
+4. Download model weights
+
+bash download_weights.sh
 
 Expected layout after download:
 
-```
 ./models/
 ├── musetalkV15/
 │   ├── musetalk.json
@@ -153,22 +122,34 @@ Expected layout after download:
 │   └── diffusion_pytorch_model.bin
 └── syncnet/
     └── latentsync_syncnet.pt
-```
 
 ---
-
-## Running the Live Avatar
-
+### Test run plan for SSH
+Since you're on SSH (no browser on the server), you have two options:
+**Option A — SSH port forward (recommended)**
+On your local machine, open a new terminal and run:
 ```bash
-python run_musetalk_avatar.py \
-    --avatar_image /path/to/your/face.jpg \
-    --llm_backend ollama \
-    --llm_model llama3.2 \
-    --tts_voice af_heart \
-    --port 7860
-```
+ssh -L 7860:localhost:7860 innovation@<your-server-ip>
 
-Then open **http://localhost:7860** in your browser.
+Then on the server, start with the echo backend (no LLM needed, reflects your input directly — good for pipeline testing):
+
+python run_musetalk_avatar.py \
+    --avatar_image examples/face_1.png \
+    --llm_backend echo \
+    --port 7860
+
+Then open http://localhost:7860 in your local browser.
+
+Option B — bind to all interfaces (if your server IP is directly reachable):
+
+python run_musetalk_avatar.py \
+    --avatar_image examples/face_1.png \
+    --llm_backend echo \
+    --port 7860 \
+    --ip 0.0.0.0
+
+Then open http://<server-ip>:7860 in your browser.
+
 
 ### CLI Arguments
 
