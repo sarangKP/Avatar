@@ -12,6 +12,7 @@ Install:
     # Ubuntu: apt-get install espeak-ng
 """
 
+import math
 import re
 import numpy as np
 import scipy.signal as sps
@@ -36,12 +37,14 @@ def _get_kokoro(lang: str = "a", voice: str = "af_heart"):
 
 
 def _resample(audio: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
-    """Resample a 1-D float32 array from orig_sr → target_sr."""
+    """Resample a 1-D float32 array from orig_sr → target_sr.
+    resample_poly uses polyphase FIR filtering — far faster than DFT-based resample()
+    for simple rational ratios like 24kHz→16kHz (up=2, down=3).
+    """
     if orig_sr == target_sr:
         return audio
-    num_samples = int(len(audio) * target_sr / orig_sr)
-    resampled = sps.resample(audio, num_samples).astype(np.float32)
-    return resampled
+    g = math.gcd(orig_sr, target_sr)
+    return sps.resample_poly(audio, target_sr // g, orig_sr // g).astype(np.float32)
 
 
 def synthesize(text: str,
@@ -103,7 +106,7 @@ def synthesize_streaming(text: str,
 
     for _, _, audio in kpipe(text, voice=voice, speed=speed, split_pattern=None):
         arr = audio.numpy() if hasattr(audio, "numpy") else np.array(audio)
-        arr = _resample(arr.astype(np.float32), KOKORO_SR, TARGET_SR)
+        arr = _resample(arr.astype(np.float32), KOKORO_SR, TARGET_SR)  # uses resample_poly
         leftover = np.concatenate([leftover, arr])
 
         while len(leftover) >= chunk_samples:

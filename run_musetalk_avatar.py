@@ -15,6 +15,7 @@ Open http://localhost:7860
 
 import argparse
 import base64
+import concurrent.futures
 import io
 import json
 import os
@@ -81,20 +82,24 @@ def _numpy_to_wav_b64(audio: np.ndarray, sr: int = 16_000) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def _frames_to_jpeg_b64_list(frames) -> list:
+def _encode_frame(f) -> str:
+    """Encode a single BGR numpy frame to JPEG base64. Called from thread pool."""
     from PIL import Image
     import cv2
-    out = []
-    for f in frames:
-        # frames from MuseTalk are BGR numpy arrays — convert to RGB
-        if isinstance(f, np.ndarray):
-            if f.ndim == 3 and f.shape[2] == 3:
-                f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(f.astype(np.uint8))
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=82)
-        out.append(base64.b64encode(buf.getvalue()).decode())
-    return out
+    if isinstance(f, np.ndarray) and f.ndim == 3 and f.shape[2] == 3:
+        f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
+    img = Image.fromarray(f.astype(np.uint8))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=82)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _frames_to_jpeg_b64_list(frames) -> list:
+    # Encode all frames in parallel across CPU cores (~80-120ms → ~20-40ms)
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(8, (os.cpu_count() or 4))
+    ) as pool:
+        return list(pool.map(_encode_frame, frames))
 
 
 # ---------------------------------------------------------------------------
