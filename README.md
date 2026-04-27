@@ -5,9 +5,9 @@
 
 ---
 
-## What's Added in This Fork
+## What This Fork Adds
 
-The original MuseTalk repo provides offline video-dubbing inference. This fork adds a **fully streaming, conversational avatar system** built on top of it:
+The upstream MuseTalk repo provides offline video-dubbing inference. This fork adds a **fully streaming, conversational avatar system** on top of it:
 
 | File | Role |
 |---|---|
@@ -25,33 +25,59 @@ The original MuseTalk repo provides offline video-dubbing inference. This fork a
 User text input (browser)
         │
         ▼
-┌─────────────────┐   sentence stream  ┌──────────────────────────────┐
-│  LLM thread     │ ─────────────────► │  TTS + MuseTalk worker       │
-│  (streaming)    │                    │  (serial, per sentence)      │
-└─────────────────┘                    └──────────────┬───────────────┘
-                                                      │ SyncedChunk
-                                                      │ (audio + frames)
-                                                      ▼
-                                            ┌───────────────────┐
-                                            │Flask SSE/sync_feed│
-                                            └────────┬──────────┘
-                                                     │
-                                                     ▼
-                                            Browser (canvas + Web Audio)
-                                            AudioContext as master clock
-                                            lip-sync via playbackRate
+┌─────────────────┐  text_q   ┌─────────────────┐  tts_q   ┌─────────────────────────────┐
+│  LLM thread     │ ────────► │   TTS thread     │ ───────► │  Whisper + UNet worker      │
+│  (per request)  │           │ (always 1 ahead) │          │  (GPU inference)            │
+└─────────────────┘           └─────────────────┘          └──────────────┬──────────────┘
+                                                                           │
+                                                              ┌────────────▼────────────┐
+                                                              │  Blend pool             │
+                                                              │  (ThreadPoolExecutor)   │
+                                                              │  CPU blends batch N     │
+                                                              │  while GPU runs N+1     │
+                                                              └────────────┬────────────┘
+                                                                           │ SyncedChunk
+                                                                           │ (audio + frames)
+                                                                           ▼
+                                                              ┌─────────────────────────┐
+                                                              │  Flask SSE /sync_feed   │
+                                                              │  parallel JPEG encode   │
+                                                              └────────────┬────────────┘
+                                                                           │
+                                                                           ▼
+                                                              Browser (canvas + Web Audio)
+                                                              AudioContext as master clock
+                                                              lip-sync via playbackRate
 ```
 
 ### Thread Model
 
-- **LLM thread** — streams tokens from the LLM backend, flushes complete sentences into `text_q`
-- **TTS + MuseTalk worker** — picks sentences from `text_q`, synthesizes audio with Kokoro, runs MuseTalk UNet inference, blends frames, optionally enhances with GFPGAN, pushes `SyncedChunk` objects to `output_q`
-- **Flask SSE** — reads `output_q` and streams each chunk to the browser as a Server-Sent Event containing base64-encoded WAV audio + JPEG frames
-- **Browser** — decodes chunks, schedules audio via `AudioContext`, renders frames on `<canvas>`, adjusts `playbackRate` to maintain A/V sync
+| Thread | Queue in | Queue out | Work |
+|---|---|---|---|
+| **LLM stream** | — | `text_q` | Streams tokens, flushes complete sentences |
+| **TTS** | `text_q` | `tts_q` | Kokoro synthesis for sentence N+1 while UNet runs N |
+| **Whisper + UNet** | `tts_q` | `output_q` | Whisper feature extraction → UNet inference → parallel blend |
+| **Flask SSE** | `output_q` | browser | Parallel JPEG encode → base64 → Server-Sent Event |
+
+The TTS thread stays **one sentence ahead** of the UNet worker. By the time UNet finishes sentence N, audio for sentence N+1 is already ready — Whisper and UNet never wait on synthesis.
 
 ### A/V Sync Strategy
 
-Audio playback time is the master clock. The browser schedules each audio chunk with `AudioContext.currentTime`, then plays back the corresponding frames at a rate derived from `audio_duration / frame_count`. This eliminates JavaScript timer drift entirely.
+Audio is the master clock. The browser schedules each audio chunk with `AudioContext.currentTime`, then plays frames at a rate derived from `audio_duration / frame_count`. This eliminates JavaScript timer drift entirely.
+
+---
+
+## Latency Optimisations
+
+| Optimisation | Where | Saving |
+|---|---|---|
+| Dedicated TTS thread (runs ahead) | `musetalk_avatar_pipeline.py` | ~100–200 ms overlap per sentence |
+| Parallel frame blending — CPU blends batch N while GPU runs N+1 | `_blend_batch()` + `ThreadPoolExecutor` | ~200–300 ms |
+| In-memory audio — `BytesIO` passed directly to `AudioProcessor`, no temp file | `audio_processor.get_audio_feature()` | ~10–20 ms |
+| Polyphase resample (`resample_poly`) instead of DFT-based `resample` | `tts_kokoro._resample()` | ~25 ms |
+| Parallel JPEG encoding via `ThreadPoolExecutor` | `run_musetalk_avatar._encode_frame()` | ~80–100 ms |
+| `torch.compile(backend='cudagraphs')` on UNet | pipeline init | ~20–40% per batch after warmup |
+| `torch.backends.cudnn.benchmark = True` | pipeline init | minor, fixed-size conv inputs |
 
 ---
 
@@ -62,45 +88,53 @@ Audio playback time is the master clock. The browser schedules each audio chunk 
 - Python 3.10
 - CUDA 11.8
 - [uv](https://docs.astral.sh/uv/) package manager
-- FFmpeg
+- FFmpeg + espeak-ng
 
 ```bash
 # Install uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.cargo/env
 
-# Install FFmpeg
+# Install system deps
 sudo apt-get install -y ffmpeg espeak-ng
+```
 
----
-1. Clone the repo
+### Steps
 
+**1. Clone the repo**
+
+```bash
 git clone https://github.com/sarangKP/Avatar.git
 cd Avatar
+```
 
-2. Install Python dependencies
+**2. Install Python dependencies**
 
-# Creates .venv automatically and installs all pip-installable deps
+```bash
 uv sync
-
-# Activate the venv
 source .venv/bin/activate
+```
 
-3. Install MMLab packages
+**3. Install MMLab packages**
 
-MMLab packages require CUDA-specific pre-built wheels and cannot go through uv.
-Run the provided script after uv sync:
+MMLab wheels require CUDA-specific pre-built binaries and cannot go through `uv`. Run after `uv sync`:
 
+```bash
 bash setup_mmlab.sh
+```
 
-This installs: mmengine, mmcv==2.0.1, mmdet==3.1.0, mmpose==1.1.0
-4. Download model weights
+Installs: `mmengine`, `mmcv==2.0.1`, `mmdet==3.1.0`, `mmpose==1.1.0`
 
+**4. Download model weights**
+
+```bash
 bash download_weights.sh
+```
 
-Expected layout after download:
+Expected layout:
 
-./models/
+```
+models/
 ├── musetalkV15/
 │   ├── musetalk.json
 │   └── unet.pth
@@ -121,70 +155,83 @@ Expected layout after download:
 │   └── diffusion_pytorch_model.bin
 └── syncnet/
     └── latentsync_syncnet.pt
+```
+
+> **Note:** `79999_iter.pth` may fail to download automatically due to Google Drive restrictions. If so, download it manually via browser and copy it to `models/face-parse-bisent/79999_iter.pth`.
 
 ---
-### Test run plan for SSH
-Since you're on SSH (no browser on the server), you have two options:
-**Option A — SSH port forward (recommended)**
-On your local machine, open a new terminal and run:
+
+## Running
+
+### Option A — SSH port forward (recommended)
+
+On your local machine:
+
 ```bash
-ssh -L 7860:localhost:7860 innovation@<your-server-ip>
+ssh -L 7860:localhost:7860 user@<server-ip>
+```
 
-Then on the server, start with the echo backend (no LLM needed, reflects your input directly — good for pipeline testing):
+On the server:
 
+```bash
 python run_musetalk_avatar.py \
     --avatar_image examples/face_1.png \
     --llm_backend echo \
     --port 7860
+```
 
-Then open http://localhost:7860 in your local browser.
+Open `http://localhost:7860` in your local browser.
 
-Option B — bind to all interfaces (if your server IP is directly reachable):
+### Option B — Direct access
 
-The server already binds to `0.0.0.0` by default, so just start it normally:
+The server binds to `0.0.0.0` by default:
 
+```bash
 python run_musetalk_avatar.py \
     --avatar_image examples/face_1.png \
     --llm_backend echo \
     --port 7860
+```
 
-Then open http://<server-ip>:7860 in your browser.
+Open `http://<server-ip>:7860`.
 
+---
 
-### CLI Arguments
+## CLI Arguments
 
 | Argument | Default | Description |
 |---|---|---|
 | `--avatar_image` | *(required)* | Path to reference face image (PNG/JPG) |
-| `--unet_config` | `./models/musetalkV15/musetalk.json` | MuseTalk UNet config |
-| `--unet_model_path` | `./models/musetalkV15/unet.pth` | MuseTalk UNet weights |
-| `--whisper_dir` | `./models/whisper` | Whisper feature extractor path |
+| `--unet_config` | `./models/musetalkV15/musetalk.json` | UNet config path |
+| `--unet_model_path` | `./models/musetalkV15/unet.pth` | UNet weights path |
+| `--whisper_dir` | `./models/whisper` | Whisper feature extractor directory |
 | `--vae_type` | `sd-vae` | VAE type |
-| `--use_float16` | `True` | Use fp16 (recommended for 3080) |
+| `--use_float16` | `True` | fp16 inference (recommended for RTX 3080) |
 | `--batch_size` | `8` | Frames per UNet batch |
 | `--bbox_shift` | `0` | Vertical shift for mouth crop (px) |
 | `--extra_margin` | `10` | Extra pixels around face crop |
 | `--fps` | `25` | Output frame rate |
 | `--tts_voice` | `af_heart` | Kokoro voice tag |
-| `--tts_speed` | `1.0` | TTS speech rate |
+| `--tts_speed` | `1.0` | TTS speech rate multiplier |
 | `--llm_backend` | `echo` | `echo` / `openai` / `ollama` |
 | `--llm_model` | `llama3.2` | LLM model name |
 | `--llm_api_key` | `None` | API key (OpenAI / compatible) |
 | `--llm_base_url` | `None` | Custom API base URL |
 | `--ollama_host` | `http://localhost:11434` | Ollama server URL |
-| `--port` | `7860` | Flask server port |
+| `--port` | `7860` | Server port |
 
 ### LLM Backend Examples
 
 ```bash
 # Local Ollama (zero cost)
-python run_musetalk_avatar.py --avatar_image face.jpg --llm_backend ollama --llm_model llama3.2
+python run_musetalk_avatar.py --avatar_image face.jpg \
+    --llm_backend ollama --llm_model llama3.2
 
 # OpenAI
-python run_musetalk_avatar.py --avatar_image face.jpg --llm_backend openai \
-    --llm_model gpt-4o-mini --llm_api_key sk-...
+python run_musetalk_avatar.py --avatar_image face.jpg \
+    --llm_backend openai --llm_model gpt-4o-mini --llm_api_key sk-...
 
-# Echo (test pipeline without an LLM — reflects user input directly)
+# Echo — reflects input directly, no LLM required (good for pipeline testing)
 python run_musetalk_avatar.py --avatar_image face.jpg --llm_backend echo
 ```
 
@@ -193,42 +240,26 @@ python run_musetalk_avatar.py --avatar_image face.jpg --llm_backend echo
 ## Avatar Pre-processing
 
 On startup the pipeline pre-processes the reference image once:
-1. Detects face landmarks and bounding box
-2. Crops and resizes the face region to 256×256
-3. Encodes the crop through the VAE to get a reference latent
-4. Prepares blending masks via the face-parsing model
 
-This pre-computation means **no per-frame avatar encoding** at inference time — only the audio-conditioned UNet runs per batch.
+1. Detects face landmarks and bounding box via MMPose + FaceAlignment
+2. Crops and resizes the face region to 256×256
+3. Encodes the crop through the VAE to produce a reference latent
+4. Computes blending masks via the face-parsing model
+
+This is done once — **no per-frame avatar encoding** during inference. Only the audio-conditioned UNet runs per batch.
 
 ---
 
 ## Optional: Face Enhancement (GFPGAN)
 
-The `musetalk/utils/enhancer.py` module applies GFPGAN face restoration as a post-processing step after the full VAE decode + blending pipeline. Enhancement runs in pixel space and is optional.
+`musetalk/utils/enhancer.py` applies GFPGAN face restoration per frame after VAE decode and blending. When `gfpgan` is not installed, `enhance_frame()` returns the original frame unchanged — no errors.
 
-To enable it, ensure the GFPGAN weights are downloaded (see Installation §7) and the enhancer is imported in your inference script:
-
-```python
-from musetalk.utils.enhancer import enhance_frame
-# called per-frame after get_image_blending()
-frame = enhance_frame(frame)
-```
-
----
-
-## Original MuseTalk Inference (Offline)
-
-Standard offline inference from the original repo still works:
+To enable:
 
 ```bash
-# MuseTalk 1.5 (recommended)
-sh inference.sh v1.5 normal
-
-# MuseTalk 1.0
-sh inference.sh v1.0 normal
+pip install gfpgan
+# weights at: experiments/pretrained_models/GFPGANv1.4.pth
 ```
-
-See the original [Getting Started](#original-getting-started) section below for Gradio demo and training instructions.
 
 ---
 
@@ -236,27 +267,25 @@ See the original [Getting Started](#original-getting-started) section below for 
 
 ```
 .
-├── run_musetalk_avatar.py        # Live avatar Flask server (entry point)
+├── run_musetalk_avatar.py        # Live avatar server (entry point)
 ├── musetalk_avatar_pipeline.py   # Core streaming pipeline
 ├── tts_kokoro.py                 # Kokoro TTS wrapper
 ├── llm_wrapper.py                # Streaming LLM (Ollama / OpenAI / Echo)
 ├── musetalk/
 │   └── utils/
-│       ├── enhancer.py           # GFPGAN post-processing (added)
-│       ├── blending.py
-│       ├── audio_processor.py
+│       ├── audio_processor.py    # Whisper feature extraction (accepts BytesIO)
+│       ├── blending.py           # Frame compositing
+│       ├── enhancer.py           # GFPGAN post-processing (optional)
 │       ├── face_parsing.py
 │       ├── preprocessing.py
 │       └── utils.py
-├── models/                       # Downloaded weights (see above)
-├── experiments/
-│   └── pretrained_models/
-│       └── GFPGANv1.4.pth        # Optional GFPGAN weights
-├── scripts/
-│   └── inference.py
+├── models/                       # Downloaded weights
+├── experiments/pretrained_models/
+│   └── GFPGANv1.4.pth            # Optional GFPGAN weights
+├── scripts/inference.py
 ├── configs/
-├── requirements.txt
 ├── download_weights.sh
+├── setup_mmlab.sh
 └── app.py                        # Original Gradio demo
 ```
 
@@ -271,17 +300,21 @@ See the original [Getting Started](#original-getting-started) section below for 
 | CUDA | 11.7 | 11.8 |
 | Python | 3.10 | 3.10 |
 
-fp16 mode (`--use_float16`) is strongly recommended on consumer GPUs. On an RTX 3080, the pipeline sustains real-time 25 fps output with batch size 8.
+fp16 mode (`--use_float16`) is strongly recommended on consumer GPUs. On an RTX 3080 with batch size 8, the pipeline sustains real-time 25 fps output after the first-inference CUDA graph warmup (~25s one-time cost).
 
 ---
 
-## Original Getting Started
+## Original MuseTalk Inference (Offline)
 
-> The sections below are preserved from the upstream MuseTalk repo for reference.
+Standard offline inference from the upstream repo still works:
 
-**[github](https://github.com/TMElyralab/MuseTalk)** | **[huggingface](https://huggingface.co/TMElyralab/MuseTalk)** | **[Technical report](https://arxiv.org/abs/2410.10122)**
+```bash
+# MuseTalk 1.5 (recommended)
+sh inference.sh v1.5 normal
 
-MuseTalk is a real-time high-quality audio-driven lip-syncing model (30 fps+ on Tesla V100), operating in the latent space of `ft-mse-vae`. It modifies a face region of 256×256 px, supports multiple languages, and is distinct from diffusion models — it inpaints in a single UNet step.
+# MuseTalk 1.0
+sh inference.sh v1.0 normal
+```
 
 ### Gradio Demo
 
@@ -292,13 +325,8 @@ python app.py --use_float16 --ffmpeg_path /path/to/ffmpeg
 ### Training
 
 ```bash
-# Data preprocessing
 python -m scripts.preprocess --config ./configs/training/preprocess.yaml
-
-# Stage 1
 sh train.sh stage1
-
-# Stage 2
 sh train.sh stage2
 ```
 
@@ -309,8 +337,8 @@ sh train.sh stage2
 - [MuseTalk (TMElyralab)](https://github.com/TMElyralab/MuseTalk) — base model and architecture
 - [Kokoro TTS](https://github.com/hexgrad/kokoro) — text-to-speech synthesis
 - [GFPGAN (TencentARC)](https://github.com/TencentARC/GFPGAN) — face restoration
-- [whisper (OpenAI)](https://github.com/openai/whisper) — audio feature extraction
-- [dwpose](https://github.com/IDEA-Research/DWPose), [face-parsing](https://github.com/zllrunning/face-parsing.PyTorch), [face-alignment](https://github.com/1adrianb/face-alignment)
+- [Whisper (OpenAI)](https://github.com/openai/whisper) — audio feature extraction
+- [DWPose](https://github.com/IDEA-Research/DWPose), [face-parsing](https://github.com/zllrunning/face-parsing.PyTorch), [face-alignment](https://github.com/1adrianb/face-alignment)
 
 ---
 
@@ -320,7 +348,7 @@ sh train.sh stage2
 @article{musetalk,
   title={MuseTalk: Real-Time High-Fidelity Video Dubbing via Spatio-Temporal Sampling},
   author={Zhang, Yue and Zhong, Zhizhou and Liu, Minhao and Chen, Zhaokang and Wu, Bin and
-          Zeng, Yubin and Zhan, Chao and He, Yingjie and Huang, Junxin and Zhou, Wenjiang},
+          Zeng, Yubin and Chao, Zhan and He, Yingjie and Huang, Junxin and Zhou, Wenjiang},
   journal={arxiv},
   year={2025}
 }
