@@ -22,7 +22,11 @@ gfpgan/weights/
 *.pth
 *.onnx
 
-
+.venv/
+models/
+__pycache__/
+*.pyc
+=0.9.2
 # ============================================================
 # Upstream MuseTalk files not used by the Live Avatar Pipeline
 # ============================================================
