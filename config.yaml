@@ -1,0 +1,33 @@
+# Live Avatar runtime configuration.
+# Edit and restart, or POST to /config to update at runtime.
+
+tts:
+  voice: am_michael        # male: am_adam, am_michael, bm_george, bm_lewis
+                           # female: af_heart, af_sky, bf_emma, bf_isabella
+  speed: 1.0               # 0.5–2.0
+  language: a              # 'a' = American English, 'b' = British English
+
+enhancer:
+  enabled: true            # GFPGAN face restoration (requires `uv add gfpgan`)
+                           # adds ~30-50ms per frame but reduces mouth blur
+
+chunking:
+  enabled: true            # phrase-level streaming for low time-to-first-frame
+  min_chars: 20            # minimum chars before a soft (clause) boundary flushes
+
+avatar:
+  cache_dir: ./cache/avatars
+  bbox_shift: 0
+  extra_margin: 10
+
+unet:
+  batch_size: 8
+  fps: 25
+  use_float16: true
+  compile: true            # torch.compile (cudagraphs) — ~25s warmup, then 20-40% faster
+  audio_padding_left: 2
+  audio_padding_right: 2
+
+server:
+  host: 0.0.0.0
+  port: 7860

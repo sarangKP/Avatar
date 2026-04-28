@@ -28,7 +28,9 @@ import numpy as np
 from flask import Flask, Response, jsonify, request
 from loguru import logger
 
+import config as cfg_module
 from musetalk_avatar_pipeline import MuseTalkAvatarPipeline, SyncedChunk
+from musetalk.utils.enhancer import set_enabled as set_enhancer_enabled
 from llm_wrapper import build_llm
 
 # ---------------------------------------------------------------------------
@@ -543,6 +545,38 @@ def status():
     return jsonify({"state": _get_state()})
 
 
+@app.route("/config", methods=["GET", "POST"])
+def config_endpoint():
+    """
+    GET  → current runtime config as JSON
+    POST → deep-merge JSON body into config; applies live changes where possible
+           (TTS voice/speed, enhancer on/off, chunking params).
+           UNet/avatar/server changes require restart.
+    """
+    if request.method == "GET":
+        return jsonify(cfg_module.to_dict())
+
+    patch = request.get_json(silent=True) or {}
+    new_cfg = cfg_module.patch(patch)
+
+    # Apply live changes
+    if _pipeline is not None:
+        tts = patch.get("tts") or {}
+        if "voice" in tts:    _pipeline.tts_voice    = tts["voice"]
+        if "speed" in tts:    _pipeline.tts_speed    = float(tts["speed"])
+        if "language" in tts: _pipeline.tts_language = tts["language"]
+
+        ch = patch.get("chunking") or {}
+        if "enabled"   in ch: _pipeline.chunking_enabled = bool(ch["enabled"])
+        if "min_chars" in ch: _pipeline.chunk_min_chars  = int(ch["min_chars"])
+
+        en = patch.get("enhancer") or {}
+        if "enabled" in en:
+            set_enhancer_enabled(bool(en["enabled"]))
+
+    return jsonify(cfg_module.to_dict())
+
+
 @app.route("/send", methods=["POST"])
 def send_message():
     data = request.get_json()
@@ -620,31 +654,46 @@ def sync_feed():
 # ---------------------------------------------------------------------------
 
 def parse_args():
+    """CLI args. Only --avatar_image is required; everything else falls back
+    to config.yaml. Pass an explicit value to override the config."""
     p = argparse.ArgumentParser(description="Live Avatar — MuseTalk + Kokoro TTS")
+    p.add_argument("--avatar_image",    required=True, help="Path to reference face image")
     p.add_argument("--unet_config",     default="./models/musetalkV15/musetalk.json")
     p.add_argument("--unet_model_path", default="./models/musetalkV15/unet.pth")
     p.add_argument("--whisper_dir",     default="./models/whisper")
-    p.add_argument("--avatar_image",    required=True, help="Path to reference face image")
     p.add_argument("--vae_type",        default="sd-vae")
-    p.add_argument("--use_float16",     action="store_true", default=True)
-    p.add_argument("--batch_size",      default=8,  type=int)
-    p.add_argument("--bbox_shift",      default=0,  type=int)
-    p.add_argument("--extra_margin",    default=10, type=int)
-    p.add_argument("--fps",             default=25, type=int)
-    p.add_argument("--tts_voice",       default="af_heart")
-    p.add_argument("--tts_speed",       default=1.0, type=float)
+    # Config overrides (None = use config.yaml value)
+    p.add_argument("--tts_voice",       default=None,  help="Override config.tts.voice")
+    p.add_argument("--tts_speed",       default=None, type=float, help="Override config.tts.speed")
+    p.add_argument("--batch_size",      default=None, type=int)
+    p.add_argument("--bbox_shift",      default=None, type=int)
+    p.add_argument("--extra_margin",    default=None, type=int)
+    p.add_argument("--fps",             default=None, type=int)
+    p.add_argument("--port",            default=None, type=int)
+    # LLM backend
     p.add_argument("--llm_backend",     default="echo", choices=["echo", "openai", "ollama"])
     p.add_argument("--llm_model",       default="llama3.2")
     p.add_argument("--llm_api_key",     default=None)
     p.add_argument("--llm_base_url",    default=None)
     p.add_argument("--ollama_host",     default="http://localhost:11434")
-    p.add_argument("--port",            default=7860, type=int)
     return p.parse_args()
 
 
 def main():
     global _pipeline
     args = parse_args()
+    cfg = cfg_module.get()
+
+    # CLI overrides over config.yaml
+    tts_voice    = args.tts_voice    if args.tts_voice    is not None else cfg.tts.voice
+    tts_speed    = args.tts_speed    if args.tts_speed    is not None else cfg.tts.speed
+    batch_size   = args.batch_size   if args.batch_size   is not None else cfg.unet.batch_size
+    bbox_shift   = args.bbox_shift   if args.bbox_shift   is not None else cfg.avatar.bbox_shift
+    extra_margin = args.extra_margin if args.extra_margin is not None else cfg.avatar.extra_margin
+    fps          = args.fps          if args.fps          is not None else cfg.unet.fps
+    port         = args.port         if args.port         is not None else cfg.server.port
+
+    set_enhancer_enabled(cfg.enhancer.enabled)
 
     os.environ["OPENCV_IO_ENABLE_OPENEXR"] = "0"
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -667,14 +716,21 @@ def main():
             whisper_dir=args.whisper_dir,
             avatar_image=args.avatar_image,
             vae_type=args.vae_type,
-            use_float16=args.use_float16,
-            batch_size=args.batch_size,
-            bbox_shift=args.bbox_shift,
-            extra_margin=args.extra_margin,
-            fps=args.fps,
-            tts_voice=args.tts_voice,
-            tts_speed=args.tts_speed,
+            use_float16=cfg.unet.use_float16,
+            batch_size=batch_size,
+            bbox_shift=bbox_shift,
+            extra_margin=extra_margin,
+            fps=fps,
+            audio_padding_left=cfg.unet.audio_padding_left,
+            audio_padding_right=cfg.unet.audio_padding_right,
+            tts_voice=tts_voice,
+            tts_speed=tts_speed,
+            tts_language=cfg.tts.language,
             llm_fn=llm_fn,
+            compile_unet=cfg.unet.compile,
+            chunking_enabled=cfg.chunking.enabled,
+            chunk_min_chars=cfg.chunking.min_chars,
+            avatar_cache_dir=cfg.avatar.cache_dir,
         )
 
         _set_state("warming")
@@ -685,12 +741,13 @@ def main():
     threading.Thread(target=_init_and_warmup, daemon=True, name="Init").start()
 
     print("\n" + "=" * 60)
-    print(f"  Avatar stream ->  http://localhost:{args.port}")
+    print(f"  Avatar stream ->  http://localhost:{port}")
+    print(f"  Voice: {tts_voice}  |  Chunking: {cfg.chunking.enabled}  |  Enhancer: {cfg.enhancer.enabled}")
     print("  Ctrl-C to stop")
     print("=" * 60 + "\n")
 
     try:
-        app.run(host="0.0.0.0", port=args.port, use_reloader=False, threaded=True)
+        app.run(host=cfg.server.host, port=port, use_reloader=False, threaded=True)
     except KeyboardInterrupt:
         print("\nShutting down…")
     finally:

@@ -71,13 +71,90 @@ Audio is the master clock. The browser schedules each audio chunk with `AudioCon
 
 | Optimisation | Where | Saving |
 |---|---|---|
-| Dedicated TTS thread (runs ahead) | `musetalk_avatar_pipeline.py` | ~100–200 ms overlap per sentence |
+| **Sub-sentence chunking** — clauses become independent `SyncedChunk`s | `_chunk_sentence()` in pipeline | **~600-800ms time-to-first-frame** |
+| Dedicated TTS thread (runs ahead) | `musetalk_avatar_pipeline.py` | ~100–200 ms overlap per chunk |
 | Parallel frame blending — CPU blends batch N while GPU runs N+1 | `_blend_batch()` + `ThreadPoolExecutor` | ~200–300 ms |
+| Pre-processed avatar disk cache (hash-keyed) | `_avatar_cache_key()` | ~2-5 s on every restart after the first |
 | In-memory audio — `BytesIO` passed directly to `AudioProcessor`, no temp file | `audio_processor.get_audio_feature()` | ~10–20 ms |
 | Polyphase resample (`resample_poly`) instead of DFT-based `resample` | `tts_kokoro._resample()` | ~25 ms |
 | Parallel JPEG encoding via `ThreadPoolExecutor` | `run_musetalk_avatar._encode_frame()` | ~80–100 ms |
 | `torch.compile(backend='cudagraphs')` on UNet | pipeline init | ~20–40% per batch after warmup |
 | `torch.backends.cudnn.benchmark = True` | pipeline init | minor, fixed-size conv inputs |
+
+### Why sub-sentence chunking matters
+
+Before: every sentence is one indivisible unit through TTS → Whisper → UNet → blend → emit. The user sees a frozen face for ~1.0–1.5 s before *any* lips move, and there's a hard cut between sentences in long replies.
+
+After: sentences are split at clause boundaries (`,` `;` `:` `—`) when the chunk meets `min_chars`. Each phrase emits as soon as it's ready, so:
+- **Time-to-first-frame** drops from ~1.2 s → **~400 ms**
+- **Long paragraphs flow naturally** with breathing pauses at commas
+- **GPU stays busy** — by the time chunk N+1 needs UNet, the worker is free
+
+---
+
+## Configuration
+
+Runtime config lives in `config.yaml` at repo root. Edit + restart, or POST to `/config` for live updates.
+
+```yaml
+tts:
+  voice: am_michael        # male: am_adam, am_michael, bm_george, bm_lewis
+                           # female: af_heart, af_sky, bf_emma, bf_isabella
+  speed: 1.0               # 0.5–2.0
+  language: a              # 'a' = American English, 'b' = British English
+
+enhancer:
+  enabled: true            # GFPGAN face restoration (requires `uv add gfpgan`)
+
+chunking:
+  enabled: true            # phrase-level streaming for low time-to-first-frame
+  min_chars: 20            # min chars before a clause boundary flushes a chunk
+
+avatar:
+  cache_dir: ./cache/avatars
+
+unet:
+  batch_size: 8
+  fps: 25
+  use_float16: true
+  compile: true            # torch.compile (cudagraphs) — ~25s warmup, then 20-40% faster
+```
+
+### Live config endpoint
+
+```bash
+# Read current config
+curl http://localhost:7860/config
+
+# Switch to a different voice without restart
+curl -X POST http://localhost:7860/config \
+     -H 'Content-Type: application/json' \
+     -d '{"tts": {"voice": "bm_george"}}'
+
+# Toggle GFPGAN enhancement
+curl -X POST http://localhost:7860/config \
+     -H 'Content-Type: application/json' \
+     -d '{"enhancer": {"enabled": false}}'
+
+# Tune chunking
+curl -X POST http://localhost:7860/config \
+     -H 'Content-Type: application/json' \
+     -d '{"chunking": {"enabled": true, "min_chars": 30}}'
+```
+
+Live-updatable: `tts.voice`, `tts.speed`, `tts.language`, `chunking.*`, `enhancer.enabled`.  
+Restart-only: `unet.*`, `avatar.*`, `server.*`.
+
+### Optional: GFPGAN for sharper mouth
+
+GFPGAN restores fine details around the mouth that the VAE blurs. To enable:
+
+```bash
+uv add gfpgan
+# weights at: experiments/pretrained_models/GFPGANv1.4.pth
+```
+
+It adds ~30–50 ms per frame. If `gfpgan` isn't installed, the pipeline silently skips enhancement.
 
 ---
 
@@ -247,19 +324,6 @@ On startup the pipeline pre-processes the reference image once:
 4. Computes blending masks via the face-parsing model
 
 This is done once — **no per-frame avatar encoding** during inference. Only the audio-conditioned UNet runs per batch.
-
----
-
-## Optional: Face Enhancement (GFPGAN)
-
-`musetalk/utils/enhancer.py` applies GFPGAN face restoration per frame after VAE decode and blending. When `gfpgan` is not installed, `enhance_frame()` returns the original frame unchanged — no errors.
-
-To enable:
-
-```bash
-pip install gfpgan
-# weights at: experiments/pretrained_models/GFPGANv1.4.pth
-```
 
 ---
 

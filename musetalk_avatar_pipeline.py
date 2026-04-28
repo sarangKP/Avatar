@@ -41,14 +41,17 @@ Thread model (updated):
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import io
 import os
+import pickle
 import re
 import threading
 import queue
 import time
 import wave
 from collections import namedtuple
+from pathlib import Path
 from typing import Iterator, Optional, List, Tuple
 
 import cv2
@@ -149,11 +152,15 @@ class MuseTalkAvatarPipeline:
         fps: int = 25,
         audio_padding_left: int = 2,
         audio_padding_right: int = 2,
-        tts_voice: str = "af_heart",
+        tts_voice: str = "am_michael",
         tts_speed: float = 1.0,
+        tts_language: str = "a",
         llm_fn=None,
         output_queue_maxsize: int = 4,
         compile_unet: bool = True,
+        chunking_enabled: bool = True,
+        chunk_min_chars: int = 20,
+        avatar_cache_dir: str = "./cache/avatars",
     ):
         self.fps               = fps
         self.batch_size        = batch_size
@@ -163,7 +170,11 @@ class MuseTalkAvatarPipeline:
         self.audio_padding_right = audio_padding_right
         self.tts_voice         = tts_voice
         self.tts_speed         = tts_speed
+        self.tts_language      = tts_language
+        self.chunking_enabled  = chunking_enabled
+        self.chunk_min_chars   = chunk_min_chars
         self._avatar_image     = avatar_image
+        self._cache_dir        = Path(avatar_cache_dir)
 
         raw_fn = llm_fn or (lambda prompt: prompt)
         self.llm_fn = self._ensure_streaming(raw_fn)
@@ -268,9 +279,30 @@ class MuseTalkAvatarPipeline:
     # Avatar pre-processing  (runs once at startup)
     # ------------------------------------------------------------------
 
+    def _avatar_cache_key(self, image_path: str) -> str:
+        """Hash of (image bytes + preprocessing params) — invalidates if any change."""
+        h = hashlib.sha256()
+        with open(image_path, "rb") as f:
+            h.update(f.read())
+        h.update(f"v1|bbox_shift={self.bbox_shift}|extra_margin={self.extra_margin}".encode())
+        return h.hexdigest()[:16]
+
     def _preprocess_avatar(self, image_path: str):
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Avatar image not found: {image_path}")
+
+        cache_path = self._cache_dir / f"{self._avatar_cache_key(image_path)}.pkl"
+        if cache_path.exists():
+            t0 = time.time()
+            with open(cache_path, "rb") as f:
+                data = pickle.load(f)
+            self._input_latent_list_cycle = data["input_latent_list_cycle"]
+            self._frame_list_cycle        = data["frame_list_cycle"]
+            self._coord_list_cycle        = data["coord_list_cycle"]
+            self._mask_list_cycle         = data["mask_list_cycle"]
+            self._mask_coords_list_cycle  = data["mask_coords_list_cycle"]
+            logger.info(f"[Avatar] loaded cache {cache_path.name} in {time.time()-t0:.3f}s")
+            return
 
         coord_list, frame_list = get_landmark_and_bbox([image_path], self.bbox_shift)
 
@@ -297,6 +329,21 @@ class MuseTalkAvatarPipeline:
         self._coord_list_cycle        = coord_list        + coord_list[::-1]
         self._mask_list_cycle         = mask_list         + mask_list[::-1]
         self._mask_coords_list_cycle  = mask_coords_list  + mask_coords_list[::-1]
+
+        # Save cache for next startup
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_path, "wb") as f:
+                pickle.dump({
+                    "input_latent_list_cycle": self._input_latent_list_cycle,
+                    "frame_list_cycle":        self._frame_list_cycle,
+                    "coord_list_cycle":        self._coord_list_cycle,
+                    "mask_list_cycle":         self._mask_list_cycle,
+                    "mask_coords_list_cycle":  self._mask_coords_list_cycle,
+                }, f)
+            logger.info(f"[Avatar] cached pre-processed avatar → {cache_path}")
+        except OSError as e:
+            logger.warning(f"[Avatar] cache write failed: {e}")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -356,6 +403,37 @@ class MuseTalkAvatarPipeline:
     # LLM stream worker
     # ------------------------------------------------------------------
 
+    # Soft (clause) boundary: comma, semicolon, colon, em-dash followed by space
+    _CLAUSE_BOUNDARY = re.compile(r'(?<=[,;:—])\s+')
+
+    def _chunk_sentence(self, sentence: str) -> List[str]:
+        """
+        Sub-divide a sentence at clause boundaries.
+        Each emitted chunk is at least `chunk_min_chars` long; trailing short
+        fragments are appended to the previous chunk so we never emit a
+        2-word phrase with awkward TTS prosody.
+        """
+        if not self.chunking_enabled:
+            return [sentence]
+
+        parts = self._CLAUSE_BOUNDARY.split(sentence)
+        if len(parts) <= 1:
+            return [sentence]
+
+        chunks: List[str] = []
+        current = ""
+        for part in parts:
+            current = (current + " " + part).strip() if current else part.strip()
+            if len(current) >= self.chunk_min_chars:
+                chunks.append(current)
+                current = ""
+        if current:
+            if chunks:
+                chunks[-1] = (chunks[-1] + " " + current).strip()
+            else:
+                chunks.append(current)
+        return chunks
+
     def _llm_stream_worker(self, user_input: str):
         logger.info(f"[LLM] streaming input: {user_input!r}")
         count = 0
@@ -366,13 +444,16 @@ class MuseTalkAvatarPipeline:
                 sentence = sentence.strip()
                 if not sentence:
                     continue
-                logger.info(f"[LLM] sentence #{count+1}: {sentence!r}")
-                self._text_q.put(sentence)
-                count += 1
+                for chunk in self._chunk_sentence(sentence):
+                    if self._interrupt.is_set():
+                        return
+                    count += 1
+                    logger.info(f"[LLM] chunk #{count}: {chunk!r}")
+                    self._text_q.put(chunk)
         except Exception as exc:
             logger.error(f"[LLM stream] error: {exc}")
         finally:
-            logger.info(f"[LLM] stream done — {count} sentence(s) queued")
+            logger.info(f"[LLM] stream done — {count} chunk(s) queued")
 
     # ------------------------------------------------------------------
     # OPT 1: Dedicated TTS thread — runs concurrently with UNet worker
@@ -406,7 +487,12 @@ class MuseTalkAvatarPipeline:
             t0 = time.time()
 
             try:
-                audio = kokoro_synthesize(sentence, voice=self.tts_voice, speed=self.tts_speed)
+                audio = kokoro_synthesize(
+                    sentence,
+                    voice=self.tts_voice,
+                    lang=self.tts_language,
+                    speed=self.tts_speed,
+                )
             except Exception as exc:
                 logger.error(f"[TTS] synthesis failed: {exc}")
                 continue
