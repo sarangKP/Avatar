@@ -8,13 +8,13 @@ tts:
   language: a              # 'a' = American English, 'b' = British English
 
 enhancer:
-  enabled: true            # GFPGAN face restoration (requires `uv add gfpgan`)
-                           # adds ~30-50ms per frame but reduces mouth blur
+  enabled: false           # GFPGAN face restoration — disable for low latency (~0.26s/frame overhead)
+                           # set true for quality; requires `uv add gfpgan`
   model_path: experiments/pretrained_models/GFPGANv1.4.pth  # v1.3 and v1.4 both work
 
 chunking:
   enabled: true            # phrase-level streaming for low time-to-first-frame
-  min_chars: 20            # minimum chars before a soft (clause) boundary flushes
+  min_chars: 5             # minimum chars before a soft (clause) boundary flushes
 
 avatar:
   cache_dir: ./cache/avatars
