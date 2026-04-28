@@ -296,6 +296,92 @@ const unmuteBanner = document.getElementById('unmute-banner');
 let audioCtx   = null;
 let nextPlayAt = 0;
 
+// ── Idle animation ──────────────────────────────────────────────────────────
+let lastBitmap  = null;   // last rendered frame, kept alive for idle loop
+let idleRafId   = null;   // requestAnimationFrame handle
+let idleTimerId = null;   // setTimeout before idle starts
+
+// Blink
+let blinkActive = false;
+let blinkStart  = 0;
+let nextBlinkAt = 0;
+const BLINK_MS  = 140;    // full close+open cycle duration
+const BLINK_MIN = 2800;   // ms between blinks (min)
+const BLINK_MAX = 5500;   // ms between blinks (max)
+
+// Subtle head motion (breathing bob + slow drift)
+const BOB_PX   = 1.5;    // vertical amplitude (px)
+const BOB_HZ   = 0.22;   // breathing frequency
+const DRIFT_PX = 1.0;    // horizontal amplitude (px)
+const DRIFT_HZ = 0.07;   // drift frequency
+
+function scheduleNextBlink() {
+  nextBlinkAt = performance.now() + BLINK_MIN + Math.random() * (BLINK_MAX - BLINK_MIN);
+}
+
+function drawEyelid(closedness) {
+  const W = canvas.width, H = canvas.height;
+  // Eye region approximation for a face filling most of the frame
+  const eyeY = H * 0.385;
+  const lidH  = H * 0.048 * closedness;
+  const grad  = ctx2d.createLinearGradient(0, eyeY - 2, 0, eyeY + lidH + 6);
+  grad.addColorStop(0,   `rgba(18,12,8,${0.78 * closedness})`);
+  grad.addColorStop(0.6, `rgba(18,12,8,${0.35 * closedness})`);
+  grad.addColorStop(1,   `rgba(18,12,8,0)`);
+  ctx2d.save();
+  ctx2d.fillStyle = grad;
+  ctx2d.beginPath();
+  ctx2d.roundRect(W * 0.14, eyeY - 2, W * 0.72, lidH + 8, 5);
+  ctx2d.fill();
+  ctx2d.restore();
+}
+
+function startIdle() {
+  if (idleRafId || !lastBitmap) return;
+  scheduleNextBlink();
+  const t0 = performance.now();
+
+  function tick(now) {
+    if (!lastBitmap) { idleRafId = null; return; }
+
+    const s      = (now - t0) / 1000;
+    const bobY   = Math.sin(s * BOB_HZ   * Math.PI * 2) * BOB_PX;
+    const driftX = Math.sin(s * DRIFT_HZ * Math.PI * 2) * DRIFT_PX;
+
+    if (!blinkActive && now >= nextBlinkAt) {
+      blinkActive = true;
+      blinkStart  = now;
+    }
+    let closedness = 0;
+    if (blinkActive) {
+      const p = (now - blinkStart) / BLINK_MS;
+      if (p >= 1) { blinkActive = false; scheduleNextBlink(); }
+      else closedness = p < 0.5 ? p * 2 : (1 - p) * 2;
+    }
+
+    ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+    ctx2d.save();
+    ctx2d.translate(driftX, bobY);
+    ctx2d.drawImage(lastBitmap, 0, 0, canvas.width, canvas.height);
+    ctx2d.restore();
+    if (closedness > 0) drawEyelid(closedness);
+
+    idleRafId = requestAnimationFrame(tick);
+  }
+  idleRafId = requestAnimationFrame(tick);
+}
+
+function stopIdle() {
+  if (idleRafId)   { cancelAnimationFrame(idleRafId); idleRafId = null; }
+  if (idleTimerId) { clearTimeout(idleTimerId);        idleTimerId = null; }
+}
+
+function scheduleIdleStart() {
+  clearTimeout(idleTimerId);
+  idleTimerId = setTimeout(startIdle, 600);
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 function getCtx() {
   if (!audioCtx) {
     audioCtx   = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
@@ -318,6 +404,8 @@ async function decodeJpeg(b64) {
 async function scheduleChunk(data) {
   const ctx = getCtx();
   if (ctx.state === 'suspended') { unmuteBanner.style.display = 'block'; return; }
+
+  stopIdle();  // new chunk arriving — pause idle loop
 
   const results = await Promise.all([
     decodeWav(data.audio),
@@ -350,7 +438,13 @@ async function scheduleChunk(data) {
     const isLast = i === bitmaps.length - 1;
     setTimeout(() => {
       ctx2d.drawImage(bm, 0, 0, canvas.width, canvas.height);
-      if (!isLast && bm.close) bm.close();
+      if (isLast) {
+        if (lastBitmap) lastBitmap.close?.();
+        lastBitmap = bm;          // keep last frame for idle loop
+        scheduleIdleStart();      // resume idle 600ms after last frame
+      } else {
+        bm.close?.();
+      }
     }, Math.max(0, delay));
   });
 }
@@ -363,6 +457,7 @@ function connectSyncFeed() {
   });
   es.addEventListener('reset', () => {
     if (audioCtx) nextPlayAt = audioCtx.currentTime + 0.05;
+    stopIdle();
   });
   es.onerror = () => { es.close(); setTimeout(connectSyncFeed, 2000); };
 }
