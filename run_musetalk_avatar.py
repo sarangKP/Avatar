@@ -109,274 +109,177 @@ def _frames_to_jpeg_b64_list(frames) -> list:
 # ---------------------------------------------------------------------------
 
 HTML_PAGE = r"""<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8"/>
-  <title>Live Avatar · MuseTalk</title>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Your Companion</title>
   <style>
-    :root {
-      --bg:       #0a0a0a;
-      --surface:  #111111;
-      --border:   #1e1e1e;
-      --accent:   #00e5a0;
-      --accent2:  #00b8ff;
-      --text:     #e0e0e0;
-      --muted:    #555;
-      --danger:   #ff4560;
-    }
     * { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
-      background: var(--bg);
+      background: #FEF6EC;
+      min-height: 100vh;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      min-height: 100vh;
-      font-family: 'JetBrains Mono', monospace;
-      color: var(--text);
-      gap: 0;
+      font-family: Georgia, 'Times New Roman', serif;
+      color: #3D2B1F;
+      padding: 24px 16px;
+      gap: 20px;
     }
 
-    /* subtle grid background */
-    body::before {
-      content: '';
-      position: fixed;
-      inset: 0;
-      background-image:
-        linear-gradient(rgba(0,229,160,0.03) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0,229,160,0.03) 1px, transparent 1px);
-      background-size: 40px 40px;
-      pointer-events: none;
-      z-index: 0;
-    }
-
-    .container {
-      position: relative;
-      z-index: 1;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 16px;
-    }
-
-    /* header */
-    .header {
+    h1 {
+      font-size: 26px;
+      font-weight: bold;
+      color: #7B3F00;
       text-align: center;
-      margin-bottom: 4px;
-    }
-    .header h1 {
-      font-family: 'Syne', sans-serif;
-      font-weight: 800;
-      font-size: 20px;
-      letter-spacing: 0.15em;
-      text-transform: uppercase;
-      color: var(--accent);
-    }
-    .header p {
-      font-size: 10px;
-      color: var(--muted);
-      letter-spacing: 0.2em;
-      text-transform: uppercase;
-      margin-top: 2px;
+      letter-spacing: 0.02em;
     }
 
-    /* video wrap */
+    /* Avatar */
     #video-wrap {
       position: relative;
-      width: 512px;
-      height: 512px;
+      width: 460px;
+      height: 460px;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 4px 24px rgba(123, 63, 0, 0.18);
+      background: #F5E6D0;
     }
 
     #avatar {
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      width: 512px;
-      height: 512px;
-      background: var(--surface);
+      width: 460px;
+      height: 460px;
       display: block;
     }
 
-    /* corner decorations */
-    #video-wrap::before, #video-wrap::after {
-      content: '';
-      position: absolute;
-      width: 16px;
-      height: 16px;
-      border-color: var(--accent);
-      border-style: solid;
-      z-index: 2;
-      pointer-events: none;
-    }
-    #video-wrap::before {
-      top: -1px; left: -1px;
-      border-width: 2px 0 0 2px;
-    }
-    #video-wrap::after {
-      bottom: -1px; right: -1px;
-      border-width: 0 2px 2px 0;
-    }
-
-    /* loading overlay */
+    /* Loading overlay */
     #loading-overlay {
       position: absolute;
       inset: 0;
-      border-radius: 4px;
-      background: rgba(10,10,10,0.92);
+      background: rgba(254, 246, 236, 0.93);
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: 16px;
-      transition: opacity 0.6s;
-      z-index: 3;
+      gap: 20px;
+      transition: opacity 0.5s;
     }
     #loading-overlay.hidden { opacity: 0; pointer-events: none; }
 
-    .spinner-wrap {
-      position: relative;
-      width: 48px;
-      height: 48px;
-    }
     .spinner {
-      width: 48px; height: 48px;
-      border: 2px solid var(--border);
-      border-top-color: var(--accent);
+      width: 56px; height: 56px;
+      border: 5px solid #E8C99A;
+      border-top-color: #C87941;
       border-radius: 50%;
-      animation: spin 1s linear infinite;
-    }
-    .spinner-inner {
-      position: absolute;
-      inset: 8px;
-      border: 1px solid transparent;
-      border-top-color: var(--accent2);
-      border-radius: 50%;
-      animation: spin 0.6s linear infinite reverse;
+      animation: spin 1.2s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
     #loading-msg {
-      font-size: 11px;
-      color: var(--accent);
-      letter-spacing: 0.15em;
-      text-transform: uppercase;
+      font-size: 18px;
+      color: #7B3F00;
+      text-align: center;
+      max-width: 260px;
+      line-height: 1.5;
     }
 
-    /* status bar */
-    .statusbar {
-      width: 512px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 10px;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 3px;
+    /* Status */
+    #status-bar {
+      font-size: 17px;
+      color: #7B5C3A;
+      background: #FDF0DC;
+      border: 2px solid #E8C99A;
+      border-radius: 10px;
+      padding: 10px 20px;
+      width: 460px;
+      text-align: center;
     }
-    .dot {
-      width: 6px; height: 6px;
-      border-radius: 50%;
-      background: var(--muted);
-      flex-shrink: 0;
-      transition: background 0.3s;
-    }
-    .dot.ready   { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
-    .dot.working { background: var(--accent2); box-shadow: 0 0 6px var(--accent2);
-                   animation: pulse 1s ease-in-out infinite; }
-    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-    #status { font-size: 11px; color: var(--muted); letter-spacing: 0.08em; }
 
-    /* chat */
+    /* Unmute */
+    #unmute-banner {
+      display: none;
+      font-size: 17px;
+      color: #7B3F00;
+      background: #FFF3CD;
+      border: 2px solid #F0C040;
+      border-radius: 10px;
+      padding: 12px 20px;
+      width: 460px;
+      text-align: center;
+      cursor: pointer;
+    }
+    #unmute-banner:hover { background: #FFE99A; }
+
+    /* Chat input */
     #chat-area {
-      width: 512px;
+      width: 460px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 12px;
     }
+
     #chat-form {
       display: flex;
-      gap: 8px;
+      gap: 10px;
     }
+
     #msg {
       flex: 1;
-      padding: 10px 14px;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 3px;
-      color: var(--text);
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 13px;
+      padding: 14px 18px;
+      font-family: Georgia, serif;
+      font-size: 18px;
+      color: #3D2B1F;
+      background: #FFFFFF;
+      border: 2px solid #D4A96A;
+      border-radius: 10px;
       outline: none;
       transition: border-color 0.2s;
     }
-    #msg:focus { border-color: var(--accent); }
-    #msg::placeholder { color: var(--muted); }
-    #msg:disabled { opacity: 0.3; cursor: not-allowed; }
+    #msg:focus        { border-color: #C87941; }
+    #msg::placeholder { color: #B09070; }
+    #msg:disabled     { background: #F5EDE0; color: #B09070; cursor: not-allowed; }
 
     #send-btn {
-      padding: 10px 20px;
-      background: transparent;
-      border: 1px solid var(--accent);
-      border-radius: 3px;
-      color: var(--accent);
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 12px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
+      padding: 14px 28px;
+      font-family: Georgia, serif;
+      font-size: 18px;
+      font-weight: bold;
+      color: #FFFFFF;
+      background: #C87941;
+      border: none;
+      border-radius: 10px;
       cursor: pointer;
-      transition: background 0.2s, color 0.2s;
+      transition: background 0.2s, transform 0.1s;
+      white-space: nowrap;
     }
-    #send-btn:hover:not(:disabled) {
-      background: var(--accent);
-      color: var(--bg);
-    }
-    #send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-
-    #unmute-banner {
-      display: none;
-      padding: 8px 14px;
-      background: rgba(255,69,96,0.1);
-      border: 1px solid var(--danger);
-      border-radius: 3px;
-      font-size: 11px;
-      color: var(--danger);
-      cursor: pointer;
-      text-align: center;
-      letter-spacing: 0.1em;
-    }
-    #unmute-banner:hover { background: rgba(255,69,96,0.2); }
+    #send-btn:hover:not(:disabled) { background: #A85F2A; transform: translateY(-1px); }
+    #send-btn:active:not(:disabled){ transform: translateY(0); }
+    #send-btn:disabled { background: #D4B896; cursor: not-allowed; }
   </style>
 </head>
 <body>
-  <div class="container">
-    <div class="header">
-      <h1>Live Avatar</h1>
-      <p>Powered by MuseTalk · RTX 3080</p>
-    </div>
 
-    <div id="video-wrap">
-      <canvas id="avatar" width="512" height="512"></canvas>
-      <div id="loading-overlay">
-        <div class="spinner-wrap">
-          <div class="spinner"></div>
-          <div class="spinner-inner"></div>
-        </div>
-        <div id="loading-msg">Initialising…</div>
-      </div>
-    </div>
+  <h1>Your Companion</h1>
 
-    <div class="statusbar">
-      <div class="dot" id="dot"></div>
-      <span id="status">Starting up…</span>
+  <div id="video-wrap">
+    <canvas id="avatar" width="460" height="460"></canvas>
+    <div id="loading-overlay">
+      <div class="spinner"></div>
+      <div id="loading-msg">Getting ready,<br>please wait…</div>
     </div>
+  </div>
 
-    <div id="chat-area">
-      <div id="unmute-banner">🔇 Click to enable audio</div>
-      <div id="chat-form">
-        <input type="text" id="msg" placeholder="Type your message…"
-               autofocus autocomplete="off" disabled />
-        <button id="send-btn" disabled>Send</button>
-      </div>
+  <div id="status-bar">Starting up…</div>
+
+  <div id="chat-area">
+    <div id="unmute-banner">🔇 Tap here to turn on sound</div>
+    <div id="chat-form">
+      <input type="text" id="msg" placeholder="Type something here…"
+             autofocus autocomplete="off" disabled />
+      <button id="send-btn" disabled>Send</button>
     </div>
   </div>
 
@@ -385,10 +288,9 @@ const canvas       = document.getElementById('avatar');
 const ctx2d        = canvas.getContext('2d');
 const overlay      = document.getElementById('loading-overlay');
 const loadingMsg   = document.getElementById('loading-msg');
-const dot          = document.getElementById('dot');
+const statusBar    = document.getElementById('status-bar');
 const input        = document.getElementById('msg');
 const sendBtn      = document.getElementById('send-btn');
-const statusEl     = document.getElementById('status');
 const unmuteBanner = document.getElementById('unmute-banner');
 
 let audioCtx   = null;
@@ -425,7 +327,6 @@ async function scheduleChunk(data) {
   const bitmaps         = results.slice(1);
   const fps             = data.fps;
 
-  // Dynamic sync: stretch audio to match video duration
   const videoDurationS  = bitmaps.length / fps;
   const audioDurationS  = audioBuffer.duration;
   const playbackRate    = Math.min(1.0, audioDurationS / videoDurationS);
@@ -435,16 +336,14 @@ async function scheduleChunk(data) {
   if (nextPlayAt < now + 0.01) nextPlayAt = now + 0.01;
 
   const startAt  = nextPlayAt;
-  nextPlayAt    += videoDurationS;  // advance by video duration, not audio
+  nextPlayAt    += videoDurationS;
 
-  // Schedule audio
   const src = ctx.createBufferSource();
   src.buffer = audioBuffer;
   src.playbackRate.value = playbackRate;
   src.connect(ctx.destination);
   src.start(startAt);
 
-  // Schedule frames — hold last frame to prevent freeze between sentences
   const baseMs = (startAt - ctx.currentTime) * 1000;
   bitmaps.forEach((bm, i) => {
     const delay  = baseMs + i * frameDurationMs;
@@ -456,7 +355,6 @@ async function scheduleChunk(data) {
   });
 }
 
-// SSE connection
 function connectSyncFeed() {
   const es = new EventSource('/sync_feed');
   es.addEventListener('chunk', async (e) => {
@@ -470,7 +368,6 @@ function connectSyncFeed() {
 }
 connectSyncFeed();
 
-// Unmute
 unmuteBanner.addEventListener('click', async () => {
   const ctx = getCtx();
   await ctx.resume();
@@ -478,22 +375,20 @@ unmuteBanner.addEventListener('click', async () => {
   nextPlayAt = ctx.currentTime + 0.05;
 });
 
-// Status polling
 const STATE_MSG = {
-  loading: 'Loading model weights…',
-  warming: 'Preprocessing avatar…',
-  ready:   'Ready',
+  loading: 'Getting ready, please wait…',
+  warming: 'Almost there…',
+  ready:   'Ready — type a message below',
 };
 let isReady = false;
 async function pollStatus() {
   try {
     const d = await (await fetch('/status')).json();
-    loadingMsg.textContent = STATE_MSG[d.state] || d.state;
-    statusEl.textContent   = STATE_MSG[d.state] || d.state;
+    loadingMsg.innerHTML  = (STATE_MSG[d.state] || d.state).replace(',', ',<br>');
+    statusBar.textContent = STATE_MSG[d.state] || d.state;
     if (d.state === 'ready' && !isReady) {
       isReady = true;
       overlay.classList.add('hidden');
-      dot.className = 'dot ready';
       input.disabled = sendBtn.disabled = false;
       input.focus();
     }
@@ -502,7 +397,6 @@ async function pollStatus() {
 }
 pollStatus();
 
-// Send message
 sendBtn.addEventListener('click', sendMessage);
 input.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendMessage(); });
 
@@ -511,8 +405,7 @@ async function sendMessage() {
   if (!text || !isReady) return;
   input.value = '';
   input.disabled = sendBtn.disabled = true;
-  dot.className = 'dot working';
-  statusEl.textContent = 'Generating…';
+  statusBar.textContent = 'Responding…';
   try {
     await fetch('/send', {
       method: 'POST',
@@ -521,8 +414,7 @@ async function sendMessage() {
     });
   } finally {
     input.disabled = sendBtn.disabled = false;
-    dot.className = 'dot ready';
-    statusEl.textContent = 'Ready';
+    statusBar.textContent = 'Ready — type a message below';
     input.focus();
   }
 }
