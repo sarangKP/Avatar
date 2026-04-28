@@ -301,13 +301,14 @@ let lastBitmap  = null;   // last rendered frame, kept alive for idle loop
 let idleRafId   = null;   // requestAnimationFrame handle
 let idleTimerId = null;   // setTimeout before idle starts
 
-// Blink
-let blinkActive = false;
-let blinkStart  = 0;
-let nextBlinkAt = 0;
-const BLINK_MS  = 140;    // full close+open cycle duration
-const BLINK_MIN = 2800;   // ms between blinks (min)
-const BLINK_MAX = 5500;   // ms between blinks (max)
+// Blink — image-based (loaded from /blink_frames), gradient fallback if absent
+let blinkBitmaps = [];    // ImageBitmap array: [b1, b2, b3] (increasing closure)
+let blinkActive  = false;
+let blinkStart   = 0;
+let nextBlinkAt  = 0;
+const BLINK_MS   = 160;   // full close+open cycle duration
+const BLINK_MIN  = 2800;  // ms between blinks (min)
+const BLINK_MAX  = 5500;  // ms between blinks (max)
 
 // Subtle head motion (breathing bob + slow drift)
 const BOB_PX   = 1.5;    // vertical amplitude (px)
@@ -315,13 +316,32 @@ const BOB_HZ   = 0.22;   // breathing frequency
 const DRIFT_PX = 1.0;    // horizontal amplitude (px)
 const DRIFT_HZ = 0.07;   // drift frequency
 
+// Load pre-rendered blink variants from server at startup
+async function loadBlinkFrames() {
+  try {
+    const data = await (await fetch('/blink_frames')).json();
+    if (!data.frames || data.frames.length === 0) return;
+    blinkBitmaps = await Promise.all(data.frames.map(b64 => {
+      const bin  = atob(b64);
+      const arr  = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      const blob = new Blob([arr], { type: 'image/png' });
+      return createImageBitmap(blob);
+    }));
+    console.log(`[Idle] ${blinkBitmaps.length} blink frame(s) loaded`);
+  } catch (e) {
+    console.log('[Idle] no blink frames — gradient fallback active');
+  }
+}
+loadBlinkFrames();
+
 function scheduleNextBlink() {
   nextBlinkAt = performance.now() + BLINK_MIN + Math.random() * (BLINK_MAX - BLINK_MIN);
 }
 
-function drawEyelid(closedness) {
+// Gradient fallback used only when no image variants are available
+function drawEyelidGradient(closedness) {
   const W = canvas.width, H = canvas.height;
-  // Eye region approximation for a face filling most of the frame
   const eyeY = H * 0.385;
   const lidH  = H * 0.048 * closedness;
   const grad  = ctx2d.createLinearGradient(0, eyeY - 2, 0, eyeY + lidH + 6);
@@ -352,20 +372,32 @@ function startIdle() {
       blinkActive = true;
       blinkStart  = now;
     }
-    let closedness = 0;
+
+    // progress: 0→1→0 triangle over BLINK_MS
+    let progress = 0;
     if (blinkActive) {
       const p = (now - blinkStart) / BLINK_MS;
       if (p >= 1) { blinkActive = false; scheduleNextBlink(); }
-      else closedness = p < 0.5 ? p * 2 : (1 - p) * 2;
+      else progress = p < 0.5 ? p * 2 : (1 - p) * 2;
     }
 
     ctx2d.clearRect(0, 0, canvas.width, canvas.height);
     ctx2d.save();
     ctx2d.translate(driftX, bobY);
-    ctx2d.drawImage(lastBitmap, 0, 0, canvas.width, canvas.height);
-    ctx2d.restore();
-    if (closedness > 0) drawEyelid(closedness);
 
+    if (progress > 0.05 && blinkBitmaps.length > 0) {
+      // Image-based blink: pick the correct variant for this progress level
+      const idx = Math.min(
+        Math.floor(progress * blinkBitmaps.length),
+        blinkBitmaps.length - 1
+      );
+      ctx2d.drawImage(blinkBitmaps[idx], 0, 0, canvas.width, canvas.height);
+    } else {
+      ctx2d.drawImage(lastBitmap, 0, 0, canvas.width, canvas.height);
+      if (progress > 0.05) drawEyelidGradient(progress);  // gradient fallback
+    }
+
+    ctx2d.restore();
     idleRafId = requestAnimationFrame(tick);
   }
   idleRafId = requestAnimationFrame(tick);
@@ -530,6 +562,29 @@ def index():
 @app.route("/status")
 def status():
     return jsonify({"state": _get_state()})
+
+
+@app.route("/blink_frames")
+def blink_frames():
+    """
+    Return up to 3 pre-rendered blink variant images as base64.
+    Naming convention (same folder as avatar image):
+      face.png → face_b1.png (eyes ~40% closed)
+                 face_b2.png (eyes ~80% closed)
+                 face_b3.png (eyes fully closed)
+    """
+    if _pipeline is None:
+        return jsonify({"frames": []})
+    base, _ = os.path.splitext(_pipeline._avatar_image)
+    frames = []
+    for i in range(1, 4):
+        for ext in (".png", ".jpg", ".jpeg"):
+            path = f"{base}_b{i}{ext}"
+            if os.path.exists(path):
+                with open(path, "rb") as f:
+                    frames.append(base64.b64encode(f.read()).decode())
+                break
+    return jsonify({"frames": frames})
 
 
 @app.route("/config", methods=["GET", "POST"])
