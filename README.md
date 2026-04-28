@@ -54,12 +54,12 @@ User text input (browser)
 
 | Thread | Queue in | Queue out | Work |
 |---|---|---|---|
-| **LLM stream** | — | `text_q` | Streams tokens, flushes complete sentences |
-| **TTS** | `text_q` | `tts_q` | Kokoro synthesis for sentence N+1 while UNet runs N |
+| **LLM stream** | — | `text_q` | Streams tokens, flushes sentences, sub-divides into phrase chunks at clause boundaries |
+| **TTS** | `text_q` | `tts_q` | Kokoro synthesis for chunk N+1 while UNet runs chunk N |
 | **Whisper + UNet** | `tts_q` | `output_q` | Whisper feature extraction → UNet inference → parallel blend |
 | **Flask SSE** | `output_q` | browser | Parallel JPEG encode → base64 → Server-Sent Event |
 
-The TTS thread stays **one sentence ahead** of the UNet worker. By the time UNet finishes sentence N, audio for sentence N+1 is already ready — Whisper and UNet never wait on synthesis.
+The TTS thread stays **one chunk ahead** of the UNet worker. By the time UNet finishes chunk N, audio for chunk N+1 is already synthesised — Whisper and UNet never wait on TTS.
 
 ### A/V Sync Strategy
 
@@ -147,14 +147,17 @@ Restart-only: `unet.*`, `avatar.*`, `server.*`.
 
 ### Optional: GFPGAN for sharper mouth
 
-GFPGAN restores fine details around the mouth that the VAE blurs. To enable:
+GFPGAN restores fine facial details that the VAE blurs, especially around the mouth. To enable:
 
 ```bash
 uv add gfpgan
-# weights at: experiments/pretrained_models/GFPGANv1.4.pth
+
+# Download v1.4 weights (recommended)
+wget -P experiments/pretrained_models/ \
+  https://github.com/TencentARC/GFPGAN/releases/download/v1.3.4/GFPGANv1.4.pth
 ```
 
-It adds ~30–50 ms per frame. If `gfpgan` isn't installed, the pipeline silently skips enhancement.
+v1.3 weights also work — update `enhancer.model_path` in `config.yaml` to point to your file. It adds ~30–50 ms per frame. If `gfpgan` isn't installed, the pipeline silently skips enhancement (warns once in the log).
 
 ---
 
@@ -276,6 +279,8 @@ Open `http://<server-ip>:7860`.
 
 ## CLI Arguments
 
+Most settings live in `config.yaml`. CLI flags override the config when explicitly provided.
+
 | Argument | Default | Description |
 |---|---|---|
 | `--avatar_image` | *(required)* | Path to reference face image (PNG/JPG) |
@@ -283,19 +288,20 @@ Open `http://<server-ip>:7860`.
 | `--unet_model_path` | `./models/musetalkV15/unet.pth` | UNet weights path |
 | `--whisper_dir` | `./models/whisper` | Whisper feature extractor directory |
 | `--vae_type` | `sd-vae` | VAE type |
-| `--use_float16` | `True` | fp16 inference (recommended for RTX 3080) |
-| `--batch_size` | `8` | Frames per UNet batch |
-| `--bbox_shift` | `0` | Vertical shift for mouth crop (px) |
-| `--extra_margin` | `10` | Extra pixels around face crop |
-| `--fps` | `25` | Output frame rate |
-| `--tts_voice` | `af_heart` | Kokoro voice tag |
-| `--tts_speed` | `1.0` | TTS speech rate multiplier |
+| `--tts_voice` | config.yaml | Override `tts.voice` from config |
+| `--tts_speed` | config.yaml | Override `tts.speed` from config |
+| `--batch_size` | config.yaml | Override `unet.batch_size` from config |
+| `--bbox_shift` | config.yaml | Override `avatar.bbox_shift` from config |
+| `--extra_margin` | config.yaml | Override `avatar.extra_margin` from config |
+| `--fps` | config.yaml | Override `unet.fps` from config |
+| `--port` | config.yaml | Override `server.port` from config |
 | `--llm_backend` | `echo` | `echo` / `openai` / `ollama` |
 | `--llm_model` | `llama3.2` | LLM model name |
 | `--llm_api_key` | `None` | API key (OpenAI / compatible) |
 | `--llm_base_url` | `None` | Custom API base URL |
 | `--ollama_host` | `http://localhost:11434` | Ollama server URL |
-| `--port` | `7860` | Server port |
+
+Settings only in `config.yaml` (no CLI flag): `use_float16`, `compile`, `tts.language`, `chunking.*`, `enhancer.*`, `avatar.cache_dir`.
 
 ### LLM Backend Examples
 
@@ -316,14 +322,15 @@ python run_musetalk_avatar.py --avatar_image face.jpg --llm_backend echo
 
 ## Avatar Pre-processing
 
-On startup the pipeline pre-processes the reference image once:
+On first run with a given image, the pipeline pre-processes the reference image and caches the result:
 
 1. Detects face landmarks and bounding box via MMPose + FaceAlignment
 2. Crops and resizes the face region to 256×256
 3. Encodes the crop through the VAE to produce a reference latent
 4. Computes blending masks via the face-parsing model
+5. Saves result to `cache/avatars/<hash>.pkl` (keyed by image content + bbox params)
 
-This is done once — **no per-frame avatar encoding** during inference. Only the audio-conditioned UNet runs per batch.
+On subsequent startups with the same image, step 1–4 are skipped and the cache loads in ~50 ms instead of 2–5 s. Delete `cache/avatars/` to force reprocessing. **No per-frame avatar encoding** during inference — only the audio-conditioned UNet runs per batch.
 
 ---
 
@@ -335,22 +342,25 @@ This is done once — **no per-frame avatar encoding** during inference. Only th
 ├── musetalk_avatar_pipeline.py   # Core streaming pipeline
 ├── tts_kokoro.py                 # Kokoro TTS wrapper
 ├── llm_wrapper.py                # Streaming LLM (Ollama / OpenAI / Echo)
+├── config.py                     # Runtime config loader (omegaconf)
+├── config.yaml                   # User-editable config (voice, chunking, enhancer…)
 ├── musetalk/
 │   └── utils/
 │       ├── audio_processor.py    # Whisper feature extraction (accepts BytesIO)
 │       ├── blending.py           # Frame compositing
-│       ├── enhancer.py           # GFPGAN post-processing (optional)
+│       ├── enhancer.py           # GFPGAN post-processing (toggleable via config)
 │       ├── face_parsing.py
 │       ├── preprocessing.py
 │       └── utils.py
+├── cache/
+│   └── avatars/                  # Pre-processed avatar cache (auto-generated)
 ├── models/                       # Downloaded weights
 ├── experiments/pretrained_models/
-│   └── GFPGANv1.4.pth            # Optional GFPGAN weights
+│   └── GFPGANv1.4.pth            # Optional GFPGAN weights (v1.3 also works)
 ├── scripts/inference.py
 ├── configs/
 ├── download_weights.sh
-├── setup_mmlab.sh
-└── app.py                        # Original Gradio demo
+└── setup_mmlab.sh
 ```
 
 ---
