@@ -29,9 +29,9 @@ from flask import Flask, Response, jsonify, request
 from loguru import logger
 
 import config as cfg_module
-from musetalk_avatar_pipeline import MuseTalkAvatarPipeline, SyncedChunk
+from .pipeline import MuseTalkAvatarPipeline, SyncedChunk
 from musetalk.utils.enhancer import set_enabled as set_enhancer_enabled
-from llm_wrapper import build_llm
+from .llm import build_llm
 
 # ---------------------------------------------------------------------------
 # Globals

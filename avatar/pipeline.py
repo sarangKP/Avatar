@@ -68,7 +68,7 @@ from musetalk.utils.audio_processor import AudioProcessor
 from musetalk.utils.face_parsing import FaceParsing
 from transformers import WhisperModel
 
-from tts_kokoro import synthesize as kokoro_synthesize
+from .tts import synthesize as kokoro_synthesize
 
 # ---------------------------------------------------------------------------
 # Sentinel
