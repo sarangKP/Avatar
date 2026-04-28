@@ -532,8 +532,7 @@ class MuseTalkAvatarPipeline:
             mask     = self._mask_list_cycle[ci]
             crop_box = self._mask_coords_list_cycle[ci]
             combined = get_image_blending(ori, res_resized, [x1, y1, x2, y2m], mask, crop_box)
-            combined = enhance_frame(combined)
-            result.append(combined)
+            result.append(combined)  # enhance_frame applied after GPU work completes
         return result
 
     @torch.no_grad()
@@ -618,13 +617,19 @@ class MuseTalkAvatarPipeline:
                     frame_offset += len(batch_frames)
 
                 # Collect blended results in submission order
-                blended_frames: List[np.ndarray] = []
+                raw_frames: List[np.ndarray] = []
                 for future in blend_futures:
-                    blended_frames.extend(future.result())
+                    raw_frames.extend(future.result())
+
+            # Apply GFPGAN sequentially after all GPU work is done.
+            # Running it inside the blend pool caused two bugs:
+            #   1. Parallel init → 'numpy.ndarray has no attribute append'
+            #   2. GPU ops during CUDA graph capture → stream conflict (87s freeze)
+            blended_frames = [enhance_frame(f) for f in raw_frames]
 
             logger.info(
-                f"[UNet+Blend] {total_unet_frames} frames → "
-                f"{len(blended_frames)} blended in {time.time()-t0:.3f}s"
+                f"[UNet+Blend+Enhance] {total_unet_frames} frames → "
+                f"{len(blended_frames)} in {time.time()-t0:.3f}s"
             )
 
             if self._interrupt.is_set():
