@@ -10,6 +10,7 @@ tts:
 enhancer:
   enabled: true            # GFPGAN face restoration (requires `uv add gfpgan`)
                            # adds ~30-50ms per frame but reduces mouth blur
+  model_path: experiments/pretrained_models/GFPGANv1.3.pth  # v1.3 and v1.4 both work
 
 chunking:
   enabled: true            # phrase-level streaming for low time-to-first-frame

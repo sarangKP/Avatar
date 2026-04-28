@@ -17,7 +17,7 @@ _lock = threading.RLock()
 
 _DEFAULTS: DictConfig = OmegaConf.create({
     "tts":      {"voice": "am_michael", "speed": 1.0, "language": "a"},
-    "enhancer": {"enabled": True},
+    "enhancer": {"enabled": True, "model_path": "experiments/pretrained_models/GFPGANv1.3.pth"},
     "chunking": {"enabled": True, "min_chars": 20},
     "avatar":   {"cache_dir": "./cache/avatars", "bbox_shift": 0, "extra_margin": 10},
     "unet":     {"batch_size": 8, "fps": 25, "use_float16": True, "compile": True,

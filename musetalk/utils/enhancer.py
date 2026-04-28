@@ -21,14 +21,19 @@ def _get_gfpgan():
     global _gfpgan_enhancer
     if _gfpgan_enhancer is None:
         from gfpgan import GFPGANer
+        try:
+            from config import get as get_cfg
+            model_path = get_cfg().enhancer.model_path
+        except Exception:
+            model_path = 'experiments/pretrained_models/GFPGANv1.3.pth'
         _gfpgan_enhancer = GFPGANer(
-            model_path='experiments/pretrained_models/GFPGANv1.4.pth',
+            model_path=model_path,
             upscale=1,
             arch='clean',
             channel_multiplier=2,
             bg_upsampler=None,
         )
-        print("[Enhancer] GFPGAN loaded")
+        print(f"[Enhancer] GFPGAN loaded ({model_path})")
     return _gfpgan_enhancer
 
 
