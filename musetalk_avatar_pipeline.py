@@ -40,6 +40,7 @@ Thread model (updated):
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import io
 import os
@@ -576,9 +577,9 @@ class MuseTalkAvatarPipeline:
             if self._interrupt.is_set():
                 continue
 
-            # ── Step 3+4: UNet inference — stream one SyncedChunk per batch ─
-            # Emit audio+frames together as each GPU batch completes.
-            # Keeps audio/video timing reference intact on the frontend.
+            # ── Step 3+4: UNet inference — async blend, emit per batch ──────
+            # GPU runs batch N+1 while CPU blends batch N (1-batch pipeline).
+            # Each SyncedChunk carries paired audio+frames so frontend keeps sync.
             t0 = time.time()
             frame_cursor  = 0
             total_emitted = 0
@@ -589,47 +590,50 @@ class MuseTalkAvatarPipeline:
                 self.batch_size,
             )
 
-            for whisper_batch, latent_batch in gen:
-                if self._interrupt.is_set():
-                    break
+            def _emit_pending(future, f_start, f_len):
+                blended = future.result()
+                final   = [enhance_frame(f) for f in blended]
+                a_start = int(f_start / self.fps * TTS_SR)
+                a_end   = int((f_start + f_len) / self.fps * TTS_SR)
+                sl      = audio[a_start : min(a_end, len(audio))]
+                if final and len(sl) > 0:
+                    self.output_q.put(SyncedChunk(audio=sl, frames=final, fps=self.fps))
+                return len(final)
 
-                audio_feature_batch = self._pe(whisper_batch.to(self._device))
-                latent_batch = latent_batch.to(
-                    device=self._device, dtype=self._weight_dtype
-                )
-                pred_latents = self._unet.model(
-                    latent_batch,
-                    self._timesteps,
-                    encoder_hidden_states=audio_feature_batch,
-                ).sample
-                raw_batch = list(self._vae.decode_latents(pred_latents))
+            pending = None  # (future, frame_start, frame_len)
 
-                # Blend onto original face (fast CPU op)
-                blended = self._blend_batch(raw_batch, frame_cursor)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as blend_pool:
+                for whisper_batch, latent_batch in gen:
+                    if self._interrupt.is_set():
+                        break
 
-                # Optionally enhance — no-op when enhancer.enabled=false in config
-                final_frames = [enhance_frame(f) for f in blended]
+                    # GPU inference for this batch
+                    audio_feature_batch = self._pe(whisper_batch.to(self._device))
+                    latent_batch = latent_batch.to(
+                        device=self._device, dtype=self._weight_dtype
+                    )
+                    pred_latents = self._unet.model(
+                        latent_batch,
+                        self._timesteps,
+                        encoder_hidden_states=audio_feature_batch,
+                    ).sample
+                    raw_batch = list(self._vae.decode_latents(pred_latents))
 
-                # Slice the audio segment that corresponds to these frames
-                a_start = int(frame_cursor / self.fps * TTS_SR)
-                a_end   = int((frame_cursor + len(final_frames)) / self.fps * TTS_SR)
-                audio_slice = audio[a_start : min(a_end, len(audio))]
+                    # Collect previous blend (ran concurrently with GPU above) and emit
+                    if pending is not None:
+                        total_emitted += _emit_pending(*pending)
 
-                frame_cursor  += len(final_frames)
-                total_emitted += len(final_frames)
+                    # Submit blend for current batch — runs while GPU does next batch
+                    pending = (
+                        blend_pool.submit(self._blend_batch, raw_batch, frame_cursor),
+                        frame_cursor,
+                        len(raw_batch),
+                    )
+                    frame_cursor += len(raw_batch)
 
-                if not final_frames or len(audio_slice) == 0:
-                    continue
-
-                self.output_q.put(SyncedChunk(
-                    audio=audio_slice,
-                    frames=final_frames,
-                    fps=self.fps,
-                ))
-                logger.debug(
-                    f"[Worker] sub-chunk: {len(final_frames)} frames | "
-                    f"{len(audio_slice)/TTS_SR:.3f}s audio"
-                )
+                # Flush last batch
+                if pending is not None and not self._interrupt.is_set():
+                    total_emitted += _emit_pending(*pending)
 
             logger.info(
                 f"[UNet+Blend] {total_emitted} frames streamed in {time.time()-t0:.3f}s"

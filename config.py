@@ -20,7 +20,7 @@ _DEFAULTS: DictConfig = OmegaConf.create({
     "enhancer": {"enabled": True, "model_path": "experiments/pretrained_models/GFPGANv1.3.pth"},
     "chunking": {"enabled": True, "min_chars": 5},
     "avatar":   {"cache_dir": "./cache/avatars", "bbox_shift": 0, "extra_margin": 10},
-    "unet":     {"batch_size": 8, "fps": 25, "use_float16": True, "compile": True,
+    "unet":     {"batch_size": 4, "fps": 25, "use_float16": True, "compile": False,
                  "audio_padding_left": 2, "audio_padding_right": 2},
     "server":   {"host": "0.0.0.0", "port": 7860},
 })

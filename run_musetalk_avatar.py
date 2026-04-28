@@ -92,7 +92,7 @@ def _encode_frame(f) -> str:
         f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
     img = Image.fromarray(f.astype(np.uint8))
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=82)
+    img.save(buf, format="JPEG", quality=65)
     return base64.b64encode(buf.getvalue()).decode()
 
 
