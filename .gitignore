@@ -27,6 +27,9 @@ models/
 __pycache__/
 *.pyc
 =0.9.2
+
+# Pre-processed avatar cache (regenerated from input image on first run)
+cache/
 # ============================================================
 # Upstream MuseTalk files not used by the Live Avatar Pipeline
 # ============================================================
