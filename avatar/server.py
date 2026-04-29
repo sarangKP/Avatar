@@ -306,7 +306,9 @@ let blinkBitmaps = [];    // ImageBitmap array: [b1, b2, b3] (increasing closure
 let blinkActive  = false;
 let blinkStart   = 0;
 let nextBlinkAt  = 0;
-const BLINK_MS   = 160;   // full close+open cycle duration
+const BLINK_CLOSE_MS = 120;  // eyelid close (fast)
+const BLINK_OPEN_MS  = 260;  // eyelid open (slow) — matches natural physiology
+const BLINK_MS       = BLINK_CLOSE_MS + BLINK_OPEN_MS;  // 380ms total
 const BLINK_MIN  = 2800;  // ms between blinks (min)
 const BLINK_MAX  = 5500;  // ms between blinks (max)
 
@@ -373,12 +375,18 @@ function startIdle() {
       blinkStart  = now;
     }
 
-    // progress: 0→1→0 triangle over BLINK_MS
+    // progress: 0→1 over BLINK_CLOSE_MS, then 1→0 over BLINK_OPEN_MS
     let progress = 0;
     if (blinkActive) {
-      const p = (now - blinkStart) / BLINK_MS;
-      if (p >= 1) { blinkActive = false; scheduleNextBlink(); }
-      else progress = p < 0.5 ? p * 2 : (1 - p) * 2;
+      const elapsed = now - blinkStart;
+      if (elapsed >= BLINK_MS) {
+        blinkActive = false;
+        scheduleNextBlink();
+      } else if (elapsed < BLINK_CLOSE_MS) {
+        progress = elapsed / BLINK_CLOSE_MS;           // fast close
+      } else {
+        progress = 1 - (elapsed - BLINK_CLOSE_MS) / BLINK_OPEN_MS;  // slow open
+      }
     }
 
     ctx2d.clearRect(0, 0, canvas.width, canvas.height);
